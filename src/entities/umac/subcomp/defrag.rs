@@ -1,0 +1,176 @@
+use crate::common::{address::TetraAddress, bitbuffer::BitBuffer, tdma_time::TdmaTime, tetra_common::Todo};
+
+const DEFRAG_BUF_INITIAL_LEN: usize = 512;
+const DEFRAG_BUF_MAX_LEN: usize = 4096;
+const DEFRAG_NUM_FRAGBUFS: usize = 4;
+const DEFRAG_TS_BEFORE_TIMEOUT: i32 = 10*4; // TODO check documentation. 10 frames.
+
+#[derive(Debug, PartialEq)]
+pub enum DefragBufferState {
+    Inactive,
+    Active,
+    Complete,
+}
+
+pub struct DefragBuffer {
+    pub state: DefragBufferState,
+    pub addr: TetraAddress,
+    pub t_first: TdmaTime,
+    pub t_last: TdmaTime,
+    pub num_frags: usize,
+    pub aie_info: Option<Todo>,
+    pub buffer: BitBuffer,
+}
+
+impl DefragBuffer {
+    pub fn new() -> Self {
+        Self {
+            state: DefragBufferState::Inactive,
+            addr: TetraAddress::default(),
+            t_first: TdmaTime::default(),
+            t_last: TdmaTime::default(),
+            num_frags: 0,
+            aie_info: None,
+            buffer: BitBuffer::new_autoexpand(DEFRAG_BUF_INITIAL_LEN)
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.state = DefragBufferState::Inactive;
+        self.addr = TetraAddress::default();
+        self.t_first = TdmaTime::default();
+        self.t_last = TdmaTime::default();
+        self.num_frags = 0;
+        self.aie_info = None;
+        self.buffer = BitBuffer::new_autoexpand(DEFRAG_BUF_INITIAL_LEN);
+    }
+}
+
+pub struct MacDefrag {
+    pub buffers: [DefragBuffer; DEFRAG_NUM_FRAGBUFS],
+}
+
+impl MacDefrag {
+    pub fn new() -> Self {
+        Self {
+            buffers: [
+                DefragBuffer::new(),
+                DefragBuffer::new(),
+                DefragBuffer::new(),
+                DefragBuffer::new(),
+            ],
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for buffer in &mut self.buffers {
+            buffer.reset();
+        }
+    }
+
+    pub fn age_buffers(&mut self, t: TdmaTime) {
+        for buffer in &mut self.buffers {
+            if buffer.state != DefragBufferState::Inactive && t.diff(buffer.t_last) > DEFRAG_TS_BEFORE_TIMEOUT {
+                tracing::warn!("Defrag buffer {} timed out", buffer.t_last.t);
+                buffer.reset();
+            }
+        }
+    }
+
+    /// Inserts a first fragment into a fragbuffer.
+    pub fn insert_first(&mut self, bitbuffer: &mut BitBuffer, t: TdmaTime, addr: TetraAddress, aie_info: Option<Todo>) {
+
+        // Reset target buffer if needed
+        let ts = (t.t - 1) as usize;
+        if self.buffers[ts].state != DefragBufferState::Inactive {
+            tracing::warn!("Defrag buffer {} not inactive (state: {:?})", ts, self.buffers[ts].state);
+            self.buffers[ts].reset();
+        }
+
+        // Initialize target buffer
+        self.buffers[ts].state = DefragBufferState::Active;
+        self.buffers[ts].addr = addr;
+        self.buffers[ts].t_first = t;
+        self.buffers[ts].t_last = t;
+        self.buffers[ts].num_frags = 1;
+        self.buffers[ts].aie_info = aie_info;
+
+        // Copy the bitbuffer data from pos to end into our fragbuffer
+        self.buffers[ts].buffer.copy_bits(bitbuffer, bitbuffer.get_len_remaining());
+
+        tracing::debug!("Defrag buffer {} first: ssi: {}, t_first: {}, t_last: {}, num_frags: {}: {}",
+            ts, self.buffers[ts].addr.ssi, self.buffers[ts].t_first.t, self.buffers[ts].t_last.t, 
+            self.buffers[ts].num_frags, self.buffers[ts].buffer.dump_bin());
+
+    }
+
+    pub fn insert_next(&mut self, bitbuffer: &mut BitBuffer, t: TdmaTime) {
+        
+        let ts = (t.t - 1) as usize;
+        if self.buffers[ts].state != DefragBufferState::Active {
+            tracing::warn!("Defrag buffer {} is not active", ts);
+            return;
+        }
+
+        if self.buffers[ts].buffer.get_len() + bitbuffer.get_len_remaining() > DEFRAG_BUF_MAX_LEN {
+            tracing::warn!("Defrag buffer {} would exceed max len", ts);
+            self.buffers[ts] = DefragBuffer::new();
+            return;
+        }
+
+        self.buffers[ts].t_last = t;
+        self.buffers[ts].num_frags += 1;
+
+        // Copy the bitbuffer data from pos to end into our fragbuffer
+        self.buffers[ts].buffer.copy_bits(bitbuffer, bitbuffer.get_len_remaining());
+
+        tracing::debug!("Defrag buffer {} next: ssi: {}, t_first: {}, t_last: {}, num_frags: {}: {}",
+            ts, self.buffers[ts].addr.ssi, self.buffers[ts].t_first.t, self.buffers[ts].t_last.t, 
+            self.buffers[ts].num_frags, self.buffers[ts].buffer.dump_bin());
+
+    }
+
+    pub fn insert_last(&mut self, bitbuffer: &mut BitBuffer, t: TdmaTime) {
+
+        let ts = (t.t - 1) as usize;
+        if self.buffers[ts].state != DefragBufferState::Active {
+            tracing::warn!("Defrag buffer {} is not active", ts);
+            return;
+        }
+
+        if self.buffers[ts].buffer.get_len() + bitbuffer.get_len_remaining() > DEFRAG_BUF_MAX_LEN {
+            tracing::warn!("Defrag buffer {} would exceed max len", ts);
+            self.buffers[ts] = DefragBuffer::new();
+            return;
+        }
+
+        self.buffers[ts].state = DefragBufferState::Complete;
+        self.buffers[ts].t_last = t;
+        self.buffers[ts].num_frags += 1;
+
+        // Copy the bitbuffer data from pos to end into our fragbuffer
+        self.buffers[ts].buffer.copy_bits(bitbuffer, bitbuffer.get_len_remaining());  
+
+        tracing::debug!("Defrag buffer {} last: ssi: {}, t_first: {}, t_last: {}, num_frags: {}: {}",
+            ts, self.buffers[ts].addr.ssi, self.buffers[ts].t_first.t, self.buffers[ts].t_last.t, 
+            self.buffers[ts].num_frags, self.buffers[ts].buffer.dump_bin());
+    }
+
+    /// Transfers finalized defragbuf to caller, setting bitbuffer slot pos to start. 
+    pub fn take_defragged_buf(&mut self, t: TdmaTime) -> Option<DefragBuffer> {
+        
+        let ts = (t.t - 1) as usize;
+        if self.buffers[ts].state != DefragBufferState::Complete {
+            tracing::warn!("Defrag buffer {} is not complete", ts);
+            return None;
+        }
+
+        // Take the slot out of the fragbuffer and return it
+        // We also re-initialize the fragbuffer slot with a fresh one
+        let mut defragbuffer = std::mem::replace(&mut self.buffers[ts], DefragBuffer::new());
+        defragbuffer.buffer.set_raw_end(defragbuffer.buffer.get_raw_pos());
+        defragbuffer.buffer.seek(0);
+
+        Some(defragbuffer)
+    }
+}
