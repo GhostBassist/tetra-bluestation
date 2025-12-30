@@ -48,7 +48,7 @@ impl FreqInfo {
                 carrier += 1; // Adjust carrier for negative offset
                 -6250
             },
-            12500 => 3,
+            12500 => 12500,
             _ => return Err(format!("Invalid frequency offset in frequency {}", freq))
         };
         if !(1..=8).contains(&band) {

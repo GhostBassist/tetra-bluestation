@@ -77,10 +77,7 @@ pub fn from_toml_str(toml_str: &str) -> Result<SharedConfig, Box<dyn std::error:
         apply_cell_info_patch(&mut cfg.cell, ci);
     }
 
-    // Validate required fields
-    cfg.validate()?;
-
-    // Mutable runtime state
+    // Mutable runtime state. Currently just a placeholder and not yet actually used
     let mut state = StackState::default();
     if let Some(ss) = root.stack_state {
         if let Some(v) = ss.cell_load_ca {

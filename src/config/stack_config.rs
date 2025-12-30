@@ -232,16 +232,8 @@ impl StackConfig {
         if self.phy_io.backend == PhyBackend::SoapySdr {
             let soapy_cfg = self.phy_io.soapysdr.as_ref().expect("SoapySdr config must be set for SoapySdr PhyIo");
 
-            // Check consistency of RF frequency settings with TETRA stack settings
-            // let Some(ul_freq) = soapy_cfg.ul_freq else {
-            //     return Err("PhyIo SoapySdr UL frequency must be set for BS stack mode");
-            // };
-            // let Some(dl_freq) = soapy_cfg.dl_freq else {
-            //     return Err("PhyIo SoapySdr DL frequency must be set for BS stack mode");
-            // };
-
             let Ok(f1) = FreqInfo::from_dlul_freqs(soapy_cfg.dl_freq as u32, soapy_cfg.ul_freq as u32) else {
-                return Err("Invalid PhyIo DL/UL frequencies");
+                return Err("Invalid PhyIo DL/UL frequencies (can't map to TETRA SYSINFO settings)");
             };
             let     Ok(f2) = FreqInfo::from_sysinfo_settings(
                     self.cell.freq_band, 
@@ -251,6 +243,9 @@ impl StackConfig {
                     self.cell.reverse_operation) else {
                 return Err("Invalid cell info frequency settings");
             };
+
+            tracing::debug!("PhyIo FreqInfo::from_dlul_freqs:       {:?}", f1);
+            // tracing::debug!("PhyIo FreqInfo::from_sysinfo_settings: {:?}", f2);
 
             if f1.band != f2.band {
                 return Err("PhyIo Tx frequency band does not match cell info band");
