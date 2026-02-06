@@ -38,6 +38,9 @@ pub enum Sap {
     /// MLE/SNDCP
     TlpdSap,
 
+    /// MM -> User
+    TnmmSap,
+
     /// Custom SAP for inter-entity control messages
     Control
 }

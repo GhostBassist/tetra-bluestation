@@ -17,4 +17,8 @@ pub enum TetraEntity {
     Cmce,
     /// SubNetwork Dependent Convergence Protocol
     Sndcp,
+
+    /// Any U-plane entity. SAP determines routing
+    User,
+
 }

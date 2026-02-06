@@ -17,4 +17,6 @@ pub mod tmv;
 pub mod tp;
 pub mod tpc;
 
+pub mod tnmm;
+
 pub use sapmsg::*;

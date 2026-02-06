@@ -205,7 +205,11 @@ static INIT_LOG: Once = Once::new();
 /// Sets up logging with maximum verbosity (trace level)
 /// Mainly for unit tests
 pub fn setup_logging_verbose() {
-    let stdout_filter = EnvFilter::new("trace");
+
+    let stdout_filter = EnvFilter::new("trace")
+        .add_directive("quinn=info".parse().unwrap())
+        .add_directive("quinn_proto=info".parse().unwrap());
+
     setup_logging(stdout_filter, None);
 }
 
@@ -229,6 +233,9 @@ pub fn get_default_filter() -> EnvFilter {
 pub fn get_default_stdout_filter() -> EnvFilter {
 
     EnvFilter::new("info")
+        // Quinn / QUIC debug logging
+        .add_directive("quinn=info".parse().unwrap())
+        .add_directive("quinn_proto=info".parse().unwrap())
 
         // Hide continuous logs from lower layers
         .add_directive("tetra_entities::messagerouter=warn".parse().unwrap())

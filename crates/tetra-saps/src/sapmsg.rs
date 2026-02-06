@@ -7,6 +7,8 @@ use tetra_core::tetra_entities::TetraEntity;
 use crate::control::call_control::CallControl;
 use crate::tmd::TmdCircuitDataInd;
 use crate::tmd::TmdCircuitDataReq;
+use crate::tnmm::TnmmTestDemand;
+use crate::tnmm::TnmmTestResponse;
 
 use super::lcmc::*;
 use super::lmm::*;
@@ -78,7 +80,12 @@ pub enum SapMsgInner {
     CmceCallControl(CallControl),
 
     // LTPD-SAP (MLE-LTPD)
-    LtpdMleUnitdataInd(LtpdMleUnitdataInd)
+    LtpdMleUnitdataInd(LtpdMleUnitdataInd),
+
+
+    // TNMM-SAP (MM-User)
+    TnmmTestDemand(TnmmTestDemand),
+    TnmmTestResponse(TnmmTestResponse),
 }
 
 impl Display for SapMsgInner {

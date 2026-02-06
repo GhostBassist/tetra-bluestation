@@ -12,10 +12,12 @@ members = [
     # Binaries
     "bins/bluestation-bs",
     "bins/pdu-tool",
+    "bins/net-tnmm-test",
+    "bins/net-tnmm-test-quic"
 ]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 authors = ["Wouter Bokslag / Midnight Blue"]
 license = "MIT"

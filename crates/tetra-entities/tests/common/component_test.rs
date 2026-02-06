@@ -79,6 +79,10 @@ impl ComponentTest {
         }
     }
     
+    pub fn get_shared_config(&self) -> SharedConfig {
+        self.config.clone()
+    }
+    
     pub fn populate_entities(&mut self, components: Vec<TetraEntity>, sinks: Vec<TetraEntity>) {
        
         match self.config.config().stack_mode {
