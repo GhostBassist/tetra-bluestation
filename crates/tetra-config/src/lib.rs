@@ -7,6 +7,8 @@
 
 pub mod stack_config;
 pub mod stack_config_soapy;
+pub mod stack_config_brew;
+
 pub mod toml_config;
 
 pub use stack_config::*;

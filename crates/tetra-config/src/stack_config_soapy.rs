@@ -84,7 +84,6 @@ pub struct CfgSoapySdr {
     /// PPM frequency error correction
     pub ppm_err: Option<f64>,
     /// Hardware-specific I/O configuration
-    #[serde(flatten)]
     pub io_cfg: SoapySdrIoCfg,
 }
 

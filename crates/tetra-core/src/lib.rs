@@ -1,11 +1,11 @@
 //! Core utilities for TETRA BlueStation
 //!
-//! This crate provides fundamental types and utilities used across the TETRA stack:
-//! - BitBuffer for bit-level PDU manipulation
-//! - TdmaTime for TDMA frame timing
-//! - Address types (ISSI, GSSI, etc.)
-//! - PHY types (PhyBlockNum, BurstType, etc.)
-//! - Common macros and debug utilities
+//! This crate provides fundamental types and utilities used across the TETRA stack
+
+/// Git version string, set at compile time
+pub const GIT_VERSION: &str = git_version::git_version!();
+/// Stack version followed by git version string, e.g., "0.1.0-aabbccdd"
+pub const STACK_VERSION: &str = const_format::formatcp!("{}-{}", env!("CARGO_PKG_VERSION"), GIT_VERSION);
 
 pub mod address;
 pub mod bitbuffer;

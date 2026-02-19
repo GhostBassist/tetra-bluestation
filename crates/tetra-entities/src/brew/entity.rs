@@ -79,6 +79,9 @@ struct UlForwardedCall {
 
 pub struct BrewEntity {
     config: SharedConfig,
+
+    brew_config: BrewConfig,
+
     dltime: TdmaTime,
 
     /// Receive events from the worker thread
@@ -110,7 +113,7 @@ impl BrewEntity {
         let (command_sender, command_receiver) = unbounded::<BrewCommand>();
 
         // Spawn worker thread
-        let worker_config = brew_config;
+        let worker_config = brew_config.clone();
         let handle = thread::Builder::new()
             .name("brew-worker".to_string())
             .spawn(move || {
@@ -121,6 +124,7 @@ impl BrewEntity {
 
         Self {
             config,
+            brew_config,
             dltime: TdmaTime::default(),
             event_receiver,
             command_sender,
@@ -554,7 +558,8 @@ impl BrewEntity {
         }
 
         // Check if this group is subscribed in Brew config
-        let groups = &self.config.config().brew.groups;
+        // let groups = &self.config.config().brew.groups;
+        let groups = &self.brew_config.groups;
         if !groups.contains(&dest_gssi) {
             tracing::debug!(
                 "BrewEntity: local call on GSSI {} not subscribed (subscribed: {:?}), not forwarding",

@@ -64,13 +64,11 @@ fn build_bs_stack(cfg: &mut SharedConfig) -> MessageRouter {
     router.register_entity(Box::new(cmce));
 
     // Register Brew entity if enabled
-    let brew_cfg = cfg.config().brew.clone();
-    if brew_cfg.enabled {
+    if let Some(brew_cfg) = cfg.config().brew.clone() {
         let brew_config = BrewConfig {
             host: brew_cfg.host,
             port: brew_cfg.port,
             tls: brew_cfg.tls,
-            user_agent: brew_cfg.user_agent,
             username: brew_cfg.username,
             password: brew_cfg.password,
             issi: brew_cfg.issi,

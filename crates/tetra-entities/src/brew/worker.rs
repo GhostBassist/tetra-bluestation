@@ -94,8 +94,6 @@ pub struct BrewConfig {
     pub port: u16,
     /// Use TLS (wss:// / https://)
     pub tls: bool,
-    /// User-Agent string for authentication (e.g., "TETRAHS/012345")
-    pub user_agent: String,
     /// Optional username for HTTP Digest auth
     pub username: Option<String>,
     /// Optional password for HTTP Digest auth
@@ -313,12 +311,15 @@ impl BrewWorker {
         tracing::info!("BrewWorker stopped");
     }
 
+    fn user_agent() -> String {
+        format!("BlueStation/{}", tetra_core::STACK_VERSION)
+    }
+
     /// Perform HTTP GET /brew/ with optional Digest Auth to get the WebSocket endpoint
     fn authenticate(&self) -> Result<String, String> {
         let host = &self.config.host;
         let port = self.config.port;
-        let ua = &self.config.user_agent;
-
+        
         // ── First request (unauthenticated) ──
         let mut stream = connect_stream(host, port, self.config.tls)?;
 
@@ -327,7 +328,7 @@ impl BrewWorker {
              Host: {}\r\n\
              User-Agent: {}\r\n\
              \r\n",
-            host, ua
+            host, Self::user_agent()
         );
         stream
             .write_all(request.as_bytes())
@@ -409,7 +410,7 @@ impl BrewWorker {
                  User-Agent: {}\r\n\
                  Authorization: {}\r\n\
                  \r\n",
-                host, ua, auth_header
+                host, Self::user_agent(), auth_header
             );
             stream2
                 .write_all(auth_request.as_bytes())
@@ -472,7 +473,7 @@ impl BrewWorker {
         let request = tungstenite::http::Request::builder()
             .uri(&ws_url)
             .header("Host", format!("{}:{}", self.config.host, self.config.port))
-            .header("User-Agent", &self.config.user_agent)
+            .header("User-Agent", Self::user_agent())
             .header("Sec-WebSocket-Protocol", "brew")
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
