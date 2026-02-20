@@ -61,6 +61,9 @@ jobs:
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
+    env:
+      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
 
     steps:
       - name: Checkout
@@ -126,10 +129,7 @@ jobs:
           apt-ftparchive -c apt-release.conf release apt-repo/dists/stable > apt-repo/dists/stable/Release
 
       - name: Optionally sign Release (if secrets are configured)
-        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' && secrets.APT_GPG_PASSPHRASE != '' }}
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        if: ${{ env.APT_GPG_PRIVATE_KEY != '' && env.APT_GPG_PASSPHRASE != '' }}
         shell: bash
         run: |
           set -euo pipefail
