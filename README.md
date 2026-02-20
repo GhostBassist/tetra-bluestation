@@ -119,6 +119,7 @@ These columns are intentionally left for team workflow in the sheet:
 - `Notes`
 
 Manual columns are preserved across sync runs.
+The workflow also applies consistent table formatting (frozen header, filter, alternating row colors, auto-sized columns) and dropdown validation for `Priority` and `Triage Status`.
 ## TETRALIB design
 
 Firstly, the project constists of modules corresponding to all TETRA components as defined in the standard. These are referred to as *entities* and are:
