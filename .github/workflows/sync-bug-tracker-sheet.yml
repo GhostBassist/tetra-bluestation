@@ -40,8 +40,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID }}
-          GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB }}
-          GOOGLE_SHEET_GID: ${{ vars.GOOGLE_SHEET_GID }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || '1VEaGJtokDDVlZ-_JD3SBQX52dQJeUbAxWxOAU8-qZsk' }}
+          GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Bug Tracker' }}
+          GOOGLE_SHEET_GID: ${{ vars.GOOGLE_SHEET_GID || '1671453665' }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python .github/scripts/sync_github_issues_to_sheet.py
