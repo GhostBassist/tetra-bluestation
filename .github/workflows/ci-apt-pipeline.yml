@@ -33,8 +33,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
+            cmake \
             pkg-config \
             libsoapysdr-dev \
+            libasound2-dev \
+            libgpiod-dev \
             dpkg-dev \
             fakeroot
 
@@ -49,6 +52,39 @@ jobs:
 
       - name: Build Debian package
         run: cargo deb -p bluestation-bs --profile release
+
+      - name: Build SoapySX Debian package
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/tejeez/sxxcvr external/sxxcvr
+          pushd external/sxxcvr >/dev/null
+          GIT_SHA="$(git rev-parse --short HEAD)"
+          VERSION="0.1.0+git${GIT_SHA}"
+          popd >/dev/null
+
+          cmake -S external/sxxcvr/SoapySX -B external/sxxcvr/SoapySX/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build external/sxxcvr/SoapySX/build --parallel
+
+          PKGROOT="${PWD}/external/sxxcvr/pkgroot"
+          rm -rf "${PKGROOT}"
+          DESTDIR="${PKGROOT}" cmake --install external/sxxcvr/SoapySX/build
+
+          mkdir -p "${PKGROOT}/DEBIAN"
+          cat > "${PKGROOT}/DEBIAN/control" <<EOF
+          Package: soapysdr-module-sx
+          Version: ${VERSION}
+          Section: libs
+          Priority: optional
+          Architecture: ${{ matrix.arch }}
+          Maintainer: Midnight Blue Labs
+          Depends: libsoapysdr0.8, libasound2, libgpiod2
+          Description: SoapySDR SXceiver support module
+           SoapySDR driver module for SXceiver hardware from tejeez/sxxcvr.
+          EOF
+
+          mkdir -p target/debian
+          dpkg-deb --build "${PKGROOT}" "target/debian/soapysdr-module-sx_${VERSION}_${{ matrix.arch }}.deb"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4

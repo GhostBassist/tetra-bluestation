@@ -26,11 +26,12 @@ copyright = "2026, Midnight Blue Labs"
 license-file = ["../../LICENSE", "4"]
 section = "net"
 priority = "optional"
-depends = "$auto"
+depends = "$auto, libsoapysdr0.8, soapysdr-module-all, soapysdr-tools, soapysdr-module-sx"
+recommends = "limesuite-udev"
 extended-description = """\
 FOSS TETRA base station stack and utilities.
 """
 assets = [
-    ["../../example_config/example_bs_config.toml", "usr/share/doc/tetra-bluestation/example_bs_config.toml", "644"],
+    ["../../example_config/config.toml", "usr/share/doc/tetra-bluestation/example_config.toml", "644"],
     ["../../README.md", "usr/share/doc/tetra-bluestation/README.md", "644"],
 ]

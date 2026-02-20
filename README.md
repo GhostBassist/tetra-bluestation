@@ -53,6 +53,11 @@ The CI pipeline builds Debian packages for:
 - `amd64` (Linux x86_64)
 - `arm64` (Debian 13 / Raspberry Pi)
 
+Published packages include:
+
+- `tetra-bluestation`
+- `soapysdr-module-sx` (built from `tejeez/sxxcvr`)
+
 On release publication (or manual workflow run), packages are published to GitHub Pages as an APT repository.
 
 1. Add the repository to your system:
