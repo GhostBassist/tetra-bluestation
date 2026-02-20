@@ -382,9 +382,11 @@ def apply_sheet_formatting(
                         "startColumnIndex": 0,
                         "endColumnIndex": col_count,
                     },
-                    "headerColor": {"red": 0.09, "green": 0.29, "blue": 0.53},
-                    "firstBandColor": {"red": 0.96, "green": 0.98, "blue": 1.0},
-                    "secondBandColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                    "rowProperties": {
+                        "headerColor": {"red": 0.09, "green": 0.29, "blue": 0.53},
+                        "firstBandColor": {"red": 0.96, "green": 0.98, "blue": 1.0},
+                        "secondBandColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                    },
                 }
             }
         },
