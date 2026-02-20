@@ -1,6 +1,9 @@
 name: CI Build and APT Publish
 
 on:
+  push:
+    branches:
+      - features/CI-Pipeline
   workflow_dispatch:
   release:
     types: [published]
