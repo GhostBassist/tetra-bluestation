@@ -7,6 +7,7 @@ This script is designed for GitHub Actions. It upserts issue rows keyed by
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -126,9 +127,51 @@ def fetch_all_issues(repo: str, token: str) -> list[dict[str, Any]]:
 
 
 def sheet_service(service_account_json: str):
-    creds_info = json.loads(service_account_json)
+    creds_info = parse_service_account_info(service_account_json)
     creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def parse_service_account_info(raw: str) -> dict[str, Any]:
+    text = (raw or "").strip()
+    if not text:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is empty.")
+
+    # 1) Standard: raw JSON object.
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, str):
+            nested = json.loads(parsed)
+            if isinstance(nested, dict):
+                return nested
+    except json.JSONDecodeError:
+        pass
+
+    # 2) Wrapped in single/double quotes.
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        unwrapped = text[1:-1].strip()
+        try:
+            parsed = json.loads(unwrapped)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # 3) Base64-encoded JSON.
+    try:
+        decoded = base64.b64decode(text, validate=True).decode("utf-8")
+        parsed = json.loads(decoded)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. Paste the full service-account JSON "
+        "or base64-encoded JSON in the secret."
+    )
 
 
 def get_sheet_values(service, spreadsheet_id: str, sheet_tab: str) -> list[list[str]]:
