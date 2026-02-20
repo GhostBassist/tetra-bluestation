@@ -47,6 +47,29 @@ cargo build --release
 chrt 99 ./target/release/tetra-bluestation ./example_bs_config.toml
 ```
 
+## Debian packages via APT
+The CI pipeline builds Debian packages for:
+
+- `amd64` (Linux x86_64)
+- `arm64` (Debian 13 / Raspberry Pi)
+
+On release publication (or manual workflow run), packages are published to GitHub Pages as an APT repository.
+
+1. Add the repository to your system:
+```
+echo "deb [trusted=yes] https://midnightbluelabs.github.io/tetra-bluestation stable main" | sudo tee /etc/apt/sources.list.d/tetra-bluestation.list
+```
+2. Update package indexes:
+```
+sudo apt update
+```
+3. Install:
+```
+sudo apt install tetra-bluestation
+```
+
+If you configure signing secrets (`APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE`) in GitHub Actions, the repository will also publish signed metadata (`InRelease` / `Release.gpg`).
+
 ## TETRALIB design
 
 Firstly, the project constists of modules corresponding to all TETRA components as defined in the standard. These are referred to as *entities* and are:

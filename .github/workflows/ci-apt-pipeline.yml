@@ -1,0 +1,155 @@
+name: CI Build and APT Publish
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    name: Build deb (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libsoapysdr-dev \
+            dpkg-dev \
+            fakeroot
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deb
+        run: cargo install --locked cargo-deb
+
+      - name: Build Debian package
+        run: cargo deb -p bluestation-bs --profile release
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  publish-apt-repo:
+    name: Publish APT repo
+    needs: build-deb
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download amd64 package
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-amd64
+          path: artifacts/amd64
+
+      - name: Download arm64 package
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-arm64
+          path: artifacts/arm64
+
+      - name: Install APT repo tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils \
+            dpkg-dev \
+            gnupg
+
+      - name: Build APT repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="apt-repo"
+          DIST="stable"
+          COMPONENT="main"
+
+          mkdir -p "${ROOT}/pool/${COMPONENT}/t/tetra-bluestation"
+          cp artifacts/amd64/*.deb "${ROOT}/pool/${COMPONENT}/t/tetra-bluestation/"
+          cp artifacts/arm64/*.deb "${ROOT}/pool/${COMPONENT}/t/tetra-bluestation/"
+
+          mkdir -p "${ROOT}/dists/${DIST}/${COMPONENT}/binary-amd64"
+          mkdir -p "${ROOT}/dists/${DIST}/${COMPONENT}/binary-arm64"
+
+          pushd "${ROOT}" >/dev/null
+          dpkg-scanpackages -a amd64 pool /dev/null > "dists/${DIST}/${COMPONENT}/binary-amd64/Packages"
+          dpkg-scanpackages -a arm64 pool /dev/null > "dists/${DIST}/${COMPONENT}/binary-arm64/Packages"
+          gzip -fk "dists/${DIST}/${COMPONENT}/binary-amd64/Packages"
+          gzip -fk "dists/${DIST}/${COMPONENT}/binary-arm64/Packages"
+          popd >/dev/null
+
+      - name: Create Release file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > apt-release.conf <<EOF
+          APT::FTPArchive::Release::Origin "MidnightBlueLabs";
+          APT::FTPArchive::Release::Label "tetra-bluestation";
+          APT::FTPArchive::Release::Suite "stable";
+          APT::FTPArchive::Release::Codename "stable";
+          APT::FTPArchive::Release::Architectures "amd64 arm64";
+          APT::FTPArchive::Release::Components "main";
+          APT::FTPArchive::Release::Description "APT packages for tetra-bluestation";
+          EOF
+
+          apt-ftparchive -c apt-release.conf release apt-repo/dists/stable > apt-repo/dists/stable/Release
+
+      - name: Optionally sign Release (if secrets are configured)
+        if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' && secrets.APT_GPG_PASSPHRASE != '' }}
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"
+
+          echo "${APT_GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+          KEY_ID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ { print $5; exit }')"
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${APT_GPG_PASSPHRASE}" \
+            --default-key "${KEY_ID}" --clearsign \
+            --output apt-repo/dists/stable/InRelease apt-repo/dists/stable/Release
+
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${APT_GPG_PASSPHRASE}" \
+            --default-key "${KEY_ID}" --armor --detach-sign \
+            --output apt-repo/dists/stable/Release.gpg apt-repo/dists/stable/Release
+
+      - name: Deploy to GitHub Pages (gh-pages)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./apt-repo
+          force_orphan: true

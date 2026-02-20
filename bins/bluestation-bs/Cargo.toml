@@ -18,3 +18,19 @@ ctrlc = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
+
+[package.metadata.deb]
+name = "tetra-bluestation"
+maintainer = "Midnight Blue Labs"
+copyright = "2026, Midnight Blue Labs"
+license-file = ["../../LICENSE", "4"]
+section = "net"
+priority = "optional"
+depends = "$auto"
+extended-description = """\
+FOSS TETRA base station stack and utilities.
+"""
+assets = [
+    ["../../example_config/example_bs_config.toml", "usr/share/doc/tetra-bluestation/example_bs_config.toml", "644"],
+    ["../../README.md", "usr/share/doc/tetra-bluestation/README.md", "644"],
+]
