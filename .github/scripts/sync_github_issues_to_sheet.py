@@ -58,6 +58,7 @@ MANAGED_COLUMNS = {
 class Config:
     github_token: str
     github_repository: str
+    source_repository: str
     sheet_id: str
     sheet_tab: str
     sheet_gid: str
@@ -79,6 +80,9 @@ def load_config() -> Config:
     return Config(
         github_token=must_getenv("GITHUB_TOKEN"),
         github_repository=must_getenv("GITHUB_REPOSITORY"),
+        source_repository=(
+            os.getenv("SOURCE_GITHUB_REPOSITORY", "").strip() or "MidnightBlueLabs/tetra-bluestation"
+        ),
         sheet_id=sheet_id,
         sheet_tab=sheet_tab,
         sheet_gid=sheet_gid,
@@ -124,6 +128,23 @@ def fetch_all_issues(repo: str, token: str) -> list[dict[str, Any]]:
         params = None
 
     return issues
+
+
+def fetch_issues_with_fallback(source_repo: str, running_repo: str, token: str) -> tuple[list[dict[str, Any]], str]:
+    try:
+        issues = fetch_all_issues(source_repo, token)
+        return issues, source_repo
+    except Exception as source_err:
+        if source_repo == running_repo:
+            raise source_err
+
+        print(
+            f"Warning: failed to pull issues from '{source_repo}', falling back to '{running_repo}'. "
+            f"Reason: {source_err}",
+            file=sys.stderr,
+        )
+        issues = fetch_all_issues(running_repo, token)
+        return issues, running_repo
 
 
 def sheet_service(service_account_json: str):
@@ -490,7 +511,11 @@ def apply_sheet_formatting(
 def main() -> int:
     try:
         cfg = load_config()
-        issues = fetch_all_issues(cfg.github_repository, cfg.github_token)
+        issues, issue_repo = fetch_issues_with_fallback(
+            cfg.source_repository,
+            cfg.github_repository,
+            cfg.github_token,
+        )
 
         sheets = sheet_service(cfg.service_account_json)
         target_tab, sheet_id = resolve_sheet_tab_and_id(
@@ -512,7 +537,7 @@ def main() -> int:
             row_count=len(rows) + 1,
         )
 
-        print(f"Synced {len(issues)} GitHub issues into '{target_tab}'.")
+        print(f"Synced {len(issues)} GitHub issues from '{issue_repo}' into '{target_tab}'.")
         return 0
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
