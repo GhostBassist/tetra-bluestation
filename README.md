@@ -80,6 +80,46 @@ sudo apt install tetra-bluestation
 
 If you configure signing secrets (`APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE`) in GitHub Actions, the repository will also publish signed metadata (`InRelease` / `Release.gpg`).
 
+## GitHub Issues -> Bug Tracker Sheet sync
+This repository includes a workflow that syncs GitHub Issues into a Google Sheets tab so the team can triage and self-assign bugs in one place.
+
+Workflow: `.github/workflows/sync-bug-tracker-sheet.yml`
+
+It runs:
+- On issue create/update/close/label/assignee changes
+- Every 30 minutes
+- Manually via `workflow_dispatch`
+
+### Setup
+1. Create a Google Cloud service account with Sheets API access.
+2. Share your tracking spreadsheet with that service account email (Editor).
+3. In GitHub repository settings, add:
+   - Secret: `GOOGLE_SERVICE_ACCOUNT_JSON` (full JSON key contents)
+   - Variable: `GOOGLE_SHEET_ID` (the spreadsheet ID)
+   - Variable: `GOOGLE_SHEET_TAB` (optional, defaults to `Bug Tracker`)
+   - Variable: `GOOGLE_SHEET_GID` (optional, tab gid from the URL, recommended)
+
+### Synced columns
+The sync job upserts rows by `Issue #` and updates these GitHub-managed columns:
+- `Issue #`
+- `Title`
+- `State`
+- `Labels`
+- `GitHub Assignees`
+- `Reporter`
+- `Created At`
+- `Updated At`
+- `Issue URL`
+
+These columns are intentionally left for team workflow in the sheet:
+- `Team Assignee`
+- `Priority`
+- `Triage Status`
+- `Sprint`
+- `Notes`
+
+Manual columns are preserved across sync runs.
+
 ## TETRALIB design
 
 Firstly, the project constists of modules corresponding to all TETRA components as defined in the standard. These are referred to as *entities* and are:
