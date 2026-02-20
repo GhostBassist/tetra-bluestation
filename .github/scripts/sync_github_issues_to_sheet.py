@@ -134,20 +134,37 @@ def get_sheet_values(service, spreadsheet_id: str, sheet_tab: str) -> list[list[
     return result.get("values", [])
 
 
-def resolve_sheet_tab(service, spreadsheet_id: str, preferred_tab: str, gid: str) -> str:
-    if gid:
-        metadata = (
-            service.spreadsheets()
-            .get(spreadsheetId=spreadsheet_id, fields="sheets(properties(sheetId,title))")
-            .execute()
+def get_sheet_metadata(service, spreadsheet_id: str) -> list[dict[str, Any]]:
+    metadata = (
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title,index),bandedRanges(bandedRangeId,range))",
         )
-        sheets = metadata.get("sheets", [])
+        .execute()
+    )
+    return metadata.get("sheets", [])
+
+
+def resolve_sheet_tab_and_id(
+    service, spreadsheet_id: str, preferred_tab: str, gid: str
+) -> tuple[str, int]:
+    sheets = get_sheet_metadata(service, spreadsheet_id)
+
+    if gid:
         for sheet in sheets:
             props = sheet.get("properties", {})
             if str(props.get("sheetId")) == gid:
-                return props.get("title", preferred_tab)
+                return props.get("title", preferred_tab), int(props["sheetId"])
 
-    return preferred_tab
+    for sheet in sheets:
+        props = sheet.get("properties", {})
+        if props.get("title") == preferred_tab:
+            return preferred_tab, int(props["sheetId"])
+
+    raise RuntimeError(
+        f"Unable to find sheet tab '{preferred_tab}'. Set GOOGLE_SHEET_TAB or GOOGLE_SHEET_GID correctly."
+    )
 
 
 def ensure_headers(existing_headers: list[str]) -> list[str]:
@@ -238,13 +255,195 @@ def clear_and_write_table(service, spreadsheet_id: str, sheet_tab: str, values: 
     ).execute()
 
 
+def apply_sheet_formatting(
+    service,
+    spreadsheet_id: str,
+    sheet_id: int,
+    headers: list[str],
+    row_count: int,
+) -> None:
+    col_count = len(headers)
+    metadata = get_sheet_metadata(service, spreadsheet_id)
+    existing_banding_ids: list[int] = []
+    for sheet in metadata:
+        props = sheet.get("properties", {})
+        if int(props.get("sheetId", -1)) == sheet_id:
+            for banded in sheet.get("bandedRanges", []):
+                band_id = banded.get("bandedRangeId")
+                if isinstance(band_id, int):
+                    existing_banding_ids.append(band_id)
+
+    def col_index(name: str) -> int:
+        return headers.index(name) if name in headers else -1
+
+    requests: list[dict[str, Any]] = []
+
+    for band_id in existing_banding_ids:
+        requests.append({"deleteBanding": {"bandedRangeId": band_id}})
+
+    requests.extend([
+        {
+            "updateSheetProperties": {
+                "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": col_count,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.09, "green": 0.29, "blue": 0.53},
+                        "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "wrapStrategy": "WRAP",
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)",
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": max(row_count, 2),
+                    "startColumnIndex": 0,
+                    "endColumnIndex": col_count,
+                },
+                "cell": {"userEnteredFormat": {"verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}},
+                "fields": "userEnteredFormat(verticalAlignment,wrapStrategy)",
+            }
+        },
+        {
+            "addBanding": {
+                "bandedRange": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": max(row_count, 2),
+                        "startColumnIndex": 0,
+                        "endColumnIndex": col_count,
+                    },
+                    "headerColor": {"red": 0.09, "green": 0.29, "blue": 0.53},
+                    "firstBandColor": {"red": 0.96, "green": 0.98, "blue": 1.0},
+                    "secondBandColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                }
+            }
+        },
+        {
+            "setBasicFilter": {
+                "filter": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": max(row_count, 2),
+                        "startColumnIndex": 0,
+                        "endColumnIndex": col_count,
+                    }
+                }
+            }
+        },
+        {
+            "autoResizeDimensions": {
+                "dimensions": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": 0,
+                    "endIndex": col_count,
+                }
+            }
+        },
+    ])
+
+    priority_idx = col_index("Priority")
+    triage_idx = col_index("Triage Status")
+
+    if priority_idx >= 0:
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": max(row_count, 2000),
+                        "startColumnIndex": priority_idx,
+                        "endColumnIndex": priority_idx + 1,
+                    },
+                    "cell": {
+                        "dataValidation": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [
+                                    {"userEnteredValue": "Critical"},
+                                    {"userEnteredValue": "High"},
+                                    {"userEnteredValue": "Medium"},
+                                    {"userEnteredValue": "Low"},
+                                ],
+                            },
+                            "strict": True,
+                            "showCustomUi": True,
+                        }
+                    },
+                    "fields": "dataValidation",
+                }
+            }
+        )
+
+    if triage_idx >= 0:
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": max(row_count, 2000),
+                        "startColumnIndex": triage_idx,
+                        "endColumnIndex": triage_idx + 1,
+                    },
+                    "cell": {
+                        "dataValidation": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [
+                                    {"userEnteredValue": "New"},
+                                    {"userEnteredValue": "Confirmed"},
+                                    {"userEnteredValue": "In Progress"},
+                                    {"userEnteredValue": "Blocked"},
+                                    {"userEnteredValue": "Done"},
+                                ],
+                            },
+                            "strict": True,
+                            "showCustomUi": True,
+                        }
+                    },
+                    "fields": "dataValidation",
+                }
+            }
+        )
+
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": requests},
+    ).execute()
+
+
 def main() -> int:
     try:
         cfg = load_config()
         issues = fetch_all_issues(cfg.github_repository, cfg.github_token)
 
         sheets = sheet_service(cfg.service_account_json)
-        target_tab = resolve_sheet_tab(sheets, cfg.sheet_id, cfg.sheet_tab, cfg.sheet_gid)
+        target_tab, sheet_id = resolve_sheet_tab_and_id(
+            sheets, cfg.sheet_id, cfg.sheet_tab, cfg.sheet_gid
+        )
         values = get_sheet_values(sheets, cfg.sheet_id, target_tab)
 
         existing_headers = values[0] if values else []
@@ -253,6 +452,13 @@ def main() -> int:
 
         rows = upsert_rows(headers, existing_rows, issues)
         clear_and_write_table(sheets, cfg.sheet_id, target_tab, [headers, *rows])
+        apply_sheet_formatting(
+            sheets,
+            cfg.sheet_id,
+            sheet_id=sheet_id,
+            headers=headers,
+            row_count=len(rows) + 1,
+        )
 
         print(f"Synced {len(issues)} GitHub issues into '{target_tab}'.")
         return 0
