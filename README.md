@@ -98,6 +98,7 @@ It runs:
    - Variable: `GOOGLE_SHEET_ID` (the spreadsheet ID)
    - Variable: `GOOGLE_SHEET_TAB` (optional, defaults to `Bug Tracker`)
    - Variable: `GOOGLE_SHEET_GID` (optional, tab gid from the URL, recommended)
+   - Variable: `SOURCE_GITHUB_REPOSITORY` (optional, defaults to `MidnightBlueLabs/tetra-bluestation`)
 
 ### Synced columns
 The sync job upserts rows by `Issue #` and updates these GitHub-managed columns:
@@ -120,6 +121,7 @@ These columns are intentionally left for team workflow in the sheet:
 
 Manual columns are preserved across sync runs.
 The workflow also applies consistent table formatting (frozen header, filter, alternating row colors, auto-sized columns) and dropdown validation for `Priority` and `Triage Status`.
+If issue pull from `SOURCE_GITHUB_REPOSITORY` fails, the script falls back to the current workflow repo (`GITHUB_REPOSITORY`).
 ## TETRALIB design
 
 Firstly, the project constists of modules corresponding to all TETRA components as defined in the standard. These are referred to as *entities* and are:

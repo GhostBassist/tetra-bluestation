@@ -40,6 +40,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_GITHUB_REPOSITORY: ${{ vars.SOURCE_GITHUB_REPOSITORY || 'MidnightBlueLabs/tetra-bluestation' }}
           GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || '1VEaGJtokDDVlZ-_JD3SBQX52dQJeUbAxWxOAU8-qZsk' }}
           GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Bug Tracker' }}
           GOOGLE_SHEET_GID: ${{ vars.GOOGLE_SHEET_GID || '1671453665' }}
