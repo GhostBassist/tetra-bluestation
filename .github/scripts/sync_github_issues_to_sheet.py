@@ -18,6 +18,9 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+DEFAULT_SHEET_ID = "1VEaGJtokDDVlZ-_JD3SBQX52dQJeUbAxWxOAU8-qZsk"
+DEFAULT_SHEET_TAB = "Bug Tracker"
+DEFAULT_SHEET_GID = "1671453665"
 
 
 REQUIRED_COLUMNS = [
@@ -68,12 +71,16 @@ def must_getenv(name: str) -> str:
 
 
 def load_config() -> Config:
+    sheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip() or DEFAULT_SHEET_ID
+    sheet_tab = os.getenv("GOOGLE_SHEET_TAB", "").strip() or DEFAULT_SHEET_TAB
+    sheet_gid = os.getenv("GOOGLE_SHEET_GID", "").strip() or DEFAULT_SHEET_GID
+
     return Config(
         github_token=must_getenv("GITHUB_TOKEN"),
         github_repository=must_getenv("GITHUB_REPOSITORY"),
-        sheet_id=must_getenv("GOOGLE_SHEET_ID"),
-        sheet_tab=os.getenv("GOOGLE_SHEET_TAB", "Bug Tracker").strip() or "Bug Tracker",
-        sheet_gid=os.getenv("GOOGLE_SHEET_GID", "").strip(),
+        sheet_id=sheet_id,
+        sheet_tab=sheet_tab,
+        sheet_gid=sheet_gid,
         service_account_json=must_getenv("GOOGLE_SERVICE_ACCOUNT_JSON"),
     )
 
