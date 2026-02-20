@@ -1,3 +1,6 @@
 .vscode
 /target
 config.toml
+.gpg-secrets/
+.tmp-sxxcvr/
+.apt-gpg-*.txt

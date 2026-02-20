@@ -62,7 +62,12 @@ On release publication (or manual workflow run), packages are published to GitHu
 
 1. Add the repository to your system:
 ```
-echo "deb [trusted=yes] https://midnightbluelabs.github.io/tetra-bluestation stable main" | sudo tee /etc/apt/sources.list.d/tetra-bluestation.list
+curl -fsSL https://midnightbluelabs.github.io/tetra-bluestation/tetra-bluestation-archive.asc \
+  | gpg --dearmor \
+  | sudo tee /usr/share/keyrings/tetra-bluestation-archive-keyring.gpg > /dev/null
+
+echo "deb [signed-by=/usr/share/keyrings/tetra-bluestation-archive-keyring.gpg] https://midnightbluelabs.github.io/tetra-bluestation stable main" \
+  | sudo tee /etc/apt/sources.list.d/tetra-bluestation.list
 ```
 2. Update package indexes:
 ```

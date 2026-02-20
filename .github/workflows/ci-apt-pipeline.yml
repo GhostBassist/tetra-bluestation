@@ -151,6 +151,12 @@ jobs:
           gzip -fk "dists/${DIST}/${COMPONENT}/binary-arm64/Packages"
           popd >/dev/null
 
+      - name: Publish repository public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp packaging/apt/tetra-bluestation-archive.asc apt-repo/tetra-bluestation-archive.asc
+
       - name: Create Release file
         shell: bash
         run: |
