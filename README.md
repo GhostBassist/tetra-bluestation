@@ -47,6 +47,78 @@ cargo build --release
 chrt 99 ./target/release/tetra-bluestation ./example_bs_config.toml
 ```
 
+## Debian packages via APT
+The CI pipeline builds Debian packages for:
+
+- `amd64` (Linux x86_64)
+- `arm64` (Debian 13 / Raspberry Pi)
+
+Published packages include:
+
+- `tetra-bluestation`
+- `soapysdr-module-sx` (built from `tejeez/sxxcvr`)
+
+On release publication (or manual workflow run), packages are published to GitHub Pages as an APT repository.
+
+1. Add the repository to your system:
+```
+curl -fsSL https://midnightbluelabs.github.io/tetra-bluestation/tetra-bluestation-archive.asc \
+  | gpg --dearmor \
+  | sudo tee /usr/share/keyrings/tetra-bluestation-archive-keyring.gpg > /dev/null
+
+echo "deb [signed-by=/usr/share/keyrings/tetra-bluestation-archive-keyring.gpg] https://midnightbluelabs.github.io/tetra-bluestation stable main" \
+  | sudo tee /etc/apt/sources.list.d/tetra-bluestation.list
+```
+2. Update package indexes:
+```
+sudo apt update
+```
+3. Install:
+```
+sudo apt install tetra-bluestation
+```
+
+If you configure signing secrets (`APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE`) in GitHub Actions, the repository will also publish signed metadata (`InRelease` / `Release.gpg`).
+
+## GitHub Issues -> Bug Tracker Sheet sync
+This repository includes a workflow that syncs GitHub Issues into a Google Sheets tab so the team can triage and self-assign bugs in one place.
+
+Workflow: `.github/workflows/sync-bug-tracker-sheet.yml`
+
+It runs:
+- On issue create/update/close/label/assignee changes
+- Every 30 minutes
+- Manually via `workflow_dispatch`
+
+### Setup
+1. Create a Google Cloud service account with Sheets API access.
+2. Share your tracking spreadsheet with that service account email (Editor).
+3. In GitHub repository settings, add:
+   - Secret: `GOOGLE_SERVICE_ACCOUNT_JSON` (full JSON key contents)
+   - Variable: `GOOGLE_SHEET_ID` (the spreadsheet ID)
+   - Variable: `GOOGLE_SHEET_TAB` (optional, defaults to `Bug Tracker`)
+   - Variable: `GOOGLE_SHEET_GID` (optional, tab gid from the URL, recommended)
+
+### Synced columns
+The sync job upserts rows by `Issue #` and updates these GitHub-managed columns:
+- `Issue #`
+- `Title`
+- `State`
+- `Labels`
+- `GitHub Assignees`
+- `Reporter`
+- `Created At`
+- `Updated At`
+- `Issue URL`
+
+These columns are intentionally left for team workflow in the sheet:
+- `Team Assignee`
+- `Priority`
+- `Triage Status`
+- `Sprint`
+- `Notes`
+
+Manual columns are preserved across sync runs.
 ## TETRALIB design
 
 Firstly, the project constists of modules corresponding to all TETRA components as defined in the standard. These are referred to as *entities* and are:
