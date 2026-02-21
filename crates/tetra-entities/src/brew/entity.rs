@@ -27,6 +27,10 @@ const BREW_JITTER_TARGET_MAX_FRAMES: usize = 12;
 const BREW_JITTER_MAX_FRAMES: usize = 24;
 /// Expected receive interval for one TCH/S frame in microseconds (~56.67 ms).
 const BREW_EXPECTED_FRAME_INTERVAL_US: f64 = 56_667.0;
+/// Warn threshold for excessive adaptive playout depth.
+const BREW_JITTER_WARN_TARGET_FRAMES: usize = 8;
+/// Rate-limit warning logs per call.
+const BREW_JITTER_WARN_INTERVAL: Duration = Duration::from_secs(5);
 
 // ─── Active call tracking ─────────────────────────────────────────
 
@@ -104,12 +108,23 @@ struct VoiceJitterBuffer {
     stable_pops: u32,
     dropped_overflow: u64,
     underruns: u64,
+    last_warn_at: Option<Instant>,
+    initial_latency_frames: usize,
 }
 
 impl VoiceJitterBuffer {
+    fn with_initial_latency(initial_latency_frames: usize) -> Self {
+        let initial = initial_latency_frames.min(BREW_JITTER_TARGET_MAX_FRAMES - BREW_JITTER_MIN_FRAMES);
+        Self {
+            target_frames: BREW_JITTER_BASE_FRAMES + initial,
+            initial_latency_frames: initial,
+            ..Default::default()
+        }
+    }
+
     fn push(&mut self, acelp_data: Vec<u8>) {
         if self.target_frames == 0 {
-            self.target_frames = BREW_JITTER_BASE_FRAMES;
+            self.target_frames = BREW_JITTER_BASE_FRAMES + self.initial_latency_frames;
         }
         let now = Instant::now();
         if let Some(prev) = self.prev_rx_at {
@@ -135,7 +150,7 @@ impl VoiceJitterBuffer {
 
     fn pop_ready(&mut self) -> Option<JitterFrame> {
         if self.target_frames == 0 {
-            self.target_frames = BREW_JITTER_BASE_FRAMES;
+            self.target_frames = BREW_JITTER_BASE_FRAMES + self.initial_latency_frames;
         }
 
         if !self.started {
@@ -179,8 +194,33 @@ impl VoiceJitterBuffer {
     fn recompute_target(&mut self) {
         let jitter_component =
             ((self.jitter_us_ewma * 2.0) / BREW_EXPECTED_FRAME_INTERVAL_US).ceil() as usize;
-        let target = BREW_JITTER_BASE_FRAMES + jitter_component + self.underrun_boost;
+        let target =
+            BREW_JITTER_BASE_FRAMES + self.initial_latency_frames + jitter_component + self.underrun_boost;
         self.target_frames = target.clamp(BREW_JITTER_MIN_FRAMES, BREW_JITTER_TARGET_MAX_FRAMES);
+    }
+
+    fn maybe_warn_unhealthy(&mut self, uuid: Uuid) {
+        let now = Instant::now();
+        if let Some(last_warn) = self.last_warn_at {
+            if now.duration_since(last_warn) < BREW_JITTER_WARN_INTERVAL {
+                return;
+            }
+        }
+
+        if self.target_frames() < BREW_JITTER_WARN_TARGET_FRAMES && self.underruns == 0 {
+            return;
+        }
+
+        self.last_warn_at = Some(now);
+        tracing::warn!(
+            "BrewEntity: high jitter on uuid={} target_frames={} queue={} underruns={} overflow_drops={} jitter_ms={:.1}",
+            uuid,
+            self.target_frames(),
+            self.frames.len(),
+            self.underruns,
+            self.dropped_overflow,
+            self.jitter_us_ewma / 1000.0
+        );
     }
 }
 
@@ -276,7 +316,7 @@ impl BrewEntity {
                     self.handle_group_call_end(queue, uuid, cause);
                 }
                 BrewEvent::VoiceFrame { uuid, length_bits, data } => {
-                    self.handle_voice_frame(queue, uuid, length_bits, data);
+                    self.handle_voice_frame(uuid, length_bits, data);
                 }
                 BrewEvent::SubscriberEvent { msg_type, issi, groups } => {
                     tracing::debug!("BrewEntity: subscriber event type={} issi={} groups={:?}", msg_type, issi, groups);
@@ -342,7 +382,9 @@ impl BrewEntity {
                 frame_count: hanging.frame_count,
             };
             self.active_calls.insert(uuid, call);
-            self.dl_jitter.entry(uuid).or_default();
+            self.dl_jitter
+                .entry(uuid)
+                .or_insert_with(|| VoiceJitterBuffer::with_initial_latency(self.brew_config.jitter_initial_latency_frames as usize));
 
             // Forward to CMCE (will reuse circuit automatically)
             queue.push_back(SapMsg {
@@ -379,7 +421,9 @@ impl BrewEntity {
             frame_count: 0,
         };
         self.active_calls.insert(uuid, call);
-        self.dl_jitter.entry(uuid).or_default();
+        self.dl_jitter
+            .entry(uuid)
+            .or_insert_with(|| VoiceJitterBuffer::with_initial_latency(self.brew_config.jitter_initial_latency_frames as usize));
 
         queue.push_back(SapMsg {
             sap: Sap::Control,
@@ -458,7 +502,7 @@ impl BrewEntity {
     }
 
     /// Handle a voice frame from Brew — inject into the downlink
-    fn handle_voice_frame(&mut self, queue: &mut MessageQueue, uuid: Uuid, _length_bits: u16, data: Vec<u8>) {
+    fn handle_voice_frame(&mut self, uuid: Uuid, _length_bits: u16, data: Vec<u8>) {
         let Some(call) = self.active_calls.get_mut(&uuid) else {
             // Voice frame for unknown call — might arrive before GROUP_TX or after GROUP_IDLE
             tracing::trace!("BrewEntity: voice frame for unknown uuid={} ({} bytes)", uuid, data.len());
@@ -498,26 +542,13 @@ impl BrewEntity {
         }
         let acelp_data = data[1..].to_vec(); // 35 bytes = 280 bits, of which 274 are ACELP
 
-        if !self.brew_config.jitter_buffer {
-            // Inject ACELP frame into the downlink via TMD SAP (legacy immediate behavior)
-            let tmd_msg = SapMsg {
-                sap: Sap::TmdSap,
-                src: TetraEntity::Brew,
-                dest: TetraEntity::Umac,
-                dltime: self.dltime,
-                msg: SapMsgInner::TmdCircuitDataReq(TmdCircuitDataReq { ts, data: acelp_data }),
-            };
-            queue.push_back(tmd_msg);
-            return;
-        }
-
-        self.dl_jitter.entry(uuid).or_default().push(acelp_data);
+        self.dl_jitter
+            .entry(uuid)
+            .or_insert_with(|| VoiceJitterBuffer::with_initial_latency(self.brew_config.jitter_initial_latency_frames as usize))
+            .push(acelp_data);
     }
 
     fn drain_jitter_playout(&mut self, queue: &mut MessageQueue) {
-        if !self.brew_config.jitter_buffer {
-            return;
-        }
         if self.dltime.f == 18 {
             return;
         }
@@ -534,22 +565,21 @@ impl BrewEntity {
             let Some(jitter) = self.dl_jitter.get_mut(uuid) else {
                 continue;
             };
+            jitter.maybe_warn_unhealthy(*uuid);
             if let Some(frame) = jitter.pop_ready() {
                 to_send.push((ts, *uuid, jitter.target_frames(), frame));
             }
         }
 
         for (ts, uuid, target_frames, frame) in to_send {
-            if self.brew_config.jitter_log {
-                tracing::debug!(
-                    "BrewEntity: playout uuid={} ts={} rx_seq={} age_ms={} target_frames={}",
-                    uuid,
-                    ts,
-                    frame.rx_seq,
-                    frame.rx_at.elapsed().as_millis(),
-                    target_frames
-                );
-            }
+            tracing::trace!(
+                "BrewEntity: playout uuid={} ts={} rx_seq={} age_ms={} target_frames={}",
+                uuid,
+                ts,
+                frame.rx_seq,
+                frame.rx_at.elapsed().as_millis(),
+                target_frames
+            );
             queue.push_back(SapMsg {
                 sap: Sap::TmdSap,
                 src: TetraEntity::Brew,

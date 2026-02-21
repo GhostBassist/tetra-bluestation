@@ -92,10 +92,8 @@ pub struct BrewConfig {
     pub groups: Vec<u32>,
     /// Reconnection delay
     pub reconnect_delay: Duration,
-    /// Enable inbound downlink jitter buffer for Brew voice
-    pub jitter_buffer: bool,
-    /// Emit adaptive jitter telemetry in logs
-    pub jitter_log: bool,
+    /// Extra initial jitter playout delay in frames (added on top of adaptive baseline)
+    pub jitter_initial_latency_frames: u8,
 }
 
 // ─── TLS helper ──────────────────────────────────────────────────
