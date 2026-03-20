@@ -1,5 +1,5 @@
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, tetra_entities::TetraEntity};
-use tetra_saps::{SapMsg, SapMsgInner, lmm::LmmMleUnitdataReq};
+use tetra_saps::{LAYER2SERVICE_ACKNOWLEDGED_RESPONSE, SapMsg, SapMsgInner, lmm::LmmMleUnitdataReq};
 
 use tetra_pdus::mm::{enums::mm_pdu_type_ul::MmPduTypeUl, pdus::mm_pdu_function_not_supported::MmPduFunctionNotSupported};
 
@@ -38,7 +38,7 @@ pub fn make_ul_mm_pdu_function_not_supported(
             sdu,
             handle,
             address: addr,
-            layer2service: 0,
+            layer2service: LAYER2SERVICE_ACKNOWLEDGED_RESPONSE,
             stealing_permission: false,
             stealing_repeats_flag: false,
             encryption_flag: false,

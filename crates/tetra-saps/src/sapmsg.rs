@@ -63,6 +63,7 @@ pub enum SapMsgInner {
     // TLA-SAP
     TlaTlDataIndBl(TlaTlDataIndBl),
     TlaTlDataReqBl(TlaTlDataReqBl),
+    TlaTlDataRespBl(TlDataRespBl),
     TlaTlReportInd(TlaTlReportInd),
     TlaTlUnitdataIndBl(TlaTlUnitdataIndBl),
     TlaTlUnitdataReqBl(TlaTlUnitdataReqBl),

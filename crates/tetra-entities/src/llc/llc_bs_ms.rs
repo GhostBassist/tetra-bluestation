@@ -8,7 +8,7 @@ use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, TxReporter, un
 use tetra_saps::lcmc::enums::alloc_type::ChanAllocType;
 use tetra_saps::lcmc::enums::ul_dl_assignment::UlDlAssignment;
 use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
-use tetra_saps::tla::{TlaTlDataIndBl, TlaTlUnitdataIndBl};
+use tetra_saps::tla::{TlDataRespBl, TlaTlDataIndBl, TlaTlDataReqBl, TlaTlUnitdataIndBl};
 use tetra_saps::tma::TmaUnitdataReq;
 use tetra_saps::{SapMsg, SapMsgInner};
 
@@ -58,6 +58,9 @@ pub struct ScheduledOutAck {
     pub nr: u8,
     /// Timeslot on which the original message was received
     pub ts: u8,
+    /// Optional payload to piggyback on the acknowledgement as a TL-DATA response.
+    pub response_sdu: Option<BitBuffer>,
+    pub response_fcs: bool,
 }
 
 pub struct Llc {
@@ -95,6 +98,8 @@ impl Llc {
             nr: ns,
             addr,
             ts: dltime.t,
+            response_sdu: None,
+            response_fcs: false,
         });
     }
 
@@ -128,6 +133,21 @@ impl Llc {
             }
         }
         None
+    }
+
+    fn attach_tldata_response(&mut self, prim: &mut TlDataRespBl) -> bool {
+        for ack in self.scheduled_out_acks.iter_mut().rev() {
+            if ack.addr.ssi == prim.main_address.ssi && ack.response_sdu.is_none() {
+                let sdu_len = prim.tl_sdu.get_len_remaining();
+                let mut response_sdu = BitBuffer::new_autoexpand(sdu_len);
+                response_sdu.copy_bits(&mut prim.tl_sdu, sdu_len);
+                response_sdu.seek(0);
+                ack.response_sdu = Some(response_sdu);
+                ack.response_fcs = prim.fcs_flag;
+                return true;
+            }
+        }
+        false
     }
 
     /// Process incoming ACK per ETSI 22.3.2.3(k).
@@ -196,7 +216,7 @@ impl Llc {
         };
 
         let mut pdu_buf = BitBuffer::new_autoexpand(32);
-        let pdu = BlUdata { has_fcs: false };
+        let pdu = BlUdata { has_fcs: prim.fcs_flag };
         pdu.to_bitbuf(&mut pdu_buf);
         let sdu_len = prim.tl_sdu.get_len_remaining();
         pdu_buf.copy_bits(&mut prim.tl_sdu, sdu_len);
@@ -373,11 +393,55 @@ impl Llc {
         // a pending message waiting for an ack.
     }
 
+    fn rx_tla_tldata_resp_bl(&mut self, queue: &mut MessageQueue, message: SapMsg) {
+        tracing::trace!("rx_tla_tldata_resp_bl");
+        let SapMsgInner::TlaTlDataRespBl(mut prim) = message.msg else {
+            panic!()
+        };
+
+        if self.attach_tldata_response(&mut prim) {
+            tracing::debug!("Queued TL-DATA response for pending ACK to SSI {}", prim.main_address.ssi);
+            return;
+        }
+
+        tracing::warn!(
+            "No pending ACK for TL-DATA response to SSI {}, falling back to TL-DATA request",
+            prim.main_address.ssi
+        );
+
+        let fallback = SapMsg {
+            sap: Sap::TlaSap,
+            src: TetraEntity::Mle,
+            dest: TetraEntity::Llc,
+            dltime: message.dltime,
+            msg: SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
+                main_address: prim.main_address,
+                link_id: prim.link_id,
+                endpoint_id: prim.endpoint_id,
+                tl_sdu: prim.tl_sdu,
+                stealing_permission: prim.stealing_permission,
+                subscriber_class: prim.subscriber_class,
+                fcs_flag: prim.fcs_flag,
+                air_interface_encryption: Some(prim.air_interface_encryption),
+                stealing_repeats_flag: prim.stealing_repeats_flag,
+                data_class_info: prim.data_class_info,
+                req_handle: prim.req_handle,
+                graceful_degradation: None,
+                chan_alloc: None,
+                tx_reporter: None,
+            }),
+        };
+        self.rx_tla_tldata_req_bl(queue, fallback);
+    }
+
     fn rx_tla_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {
         tracing::trace!("rx_tla_prim");
         match &message.msg {
             SapMsgInner::TlaTlDataReqBl(_) => {
                 self.rx_tla_tldata_req_bl(queue, message);
+            }
+            SapMsgInner::TlaTlDataRespBl(_) => {
+                self.rx_tla_tldata_resp_bl(queue, message);
             }
             SapMsgInner::TlaTlUnitdataReqBl(_) => {
                 self.rx_tla_tlunitdata_req_bl(queue, message);
@@ -698,12 +762,16 @@ impl Llc {
             // Send BL-ACK via FACCH (stealing) on the traffic timeslot if the original
             // message arrived on a traffic channel (TS2-4), otherwise via MCCH (TS1).
             let steal = matches!(ack.ts, 2..=4);
-            let mut pdu_buf = BitBuffer::new_autoexpand(5);
+            let mut pdu_buf = BitBuffer::new_autoexpand(32);
             let pdu = BlAck {
-                has_fcs: false,
+                has_fcs: ack.response_fcs,
                 nr: ack.nr,
             };
             pdu.to_bitbuf(&mut pdu_buf);
+            if let Some(mut response_sdu) = ack.response_sdu {
+                let sdu_len = response_sdu.get_len_remaining();
+                pdu_buf.copy_bits(&mut response_sdu, sdu_len);
+            }
             pdu_buf.seek(0);
             tracing::debug!(ts=%self.dltime, "-> {:?} {}", pdu, pdu_buf.dump_bin());
 

@@ -7,8 +7,11 @@ use tetra_core::{BitBuffer, Sap, TdmaTime, unimplemented_log};
 use tetra_saps::lcmc::LcmcMleUnitdataInd;
 use tetra_saps::lmm::LmmMleUnitdataInd;
 use tetra_saps::ltpd::LtpdMleUnitdataInd;
-use tetra_saps::tla::TlaTlDataReqBl;
-use tetra_saps::{SapMsg, SapMsgInner};
+use tetra_saps::tla::{TlDataRespBl, TlaTlDataReqBl, TlaTlUnitdataReqBl};
+use tetra_saps::{
+    LAYER2SERVICE_ACKNOWLEDGED_REQUEST, LAYER2SERVICE_ACKNOWLEDGED_RESPONSE, LAYER2SERVICE_UNACKNOWLEDGED, SapMsg,
+    SapMsgInner,
+};
 
 use tetra_pdus::mle::enums::mle_pdu_type_dl::MlePduTypeDl;
 use tetra_pdus::mle::enums::mle_protocol_discriminator::MleProtocolDiscriminator;
@@ -310,27 +313,78 @@ impl MleBs {
 
         // let (addr, link, endpoint) = self.router.use_handle(prim.handle, message.dltime);
         // assert_eq!(addr.ssi, prim.address.ssi);
-        let sapmsg = SapMsg {
-            sap: Sap::TlaSap,
-            src: TetraEntity::Mle,
-            dest: TetraEntity::Llc,
-            dltime: message.dltime,
-            msg: SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
+        let msg = match prim.layer2service {
+            LAYER2SERVICE_ACKNOWLEDGED_REQUEST => SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
                 main_address: prim.address,
                 link_id: 0,
                 endpoint_id: 0,
                 tl_sdu: pdu,
                 stealing_permission: false,
-                subscriber_class: 0, // TODO fixme
+                subscriber_class: 0,
                 fcs_flag: false,
                 air_interface_encryption: None,
                 stealing_repeats_flag: None,
                 data_class_info: None,
-                req_handle: 0, // TODO FIXME; should we pass the same handle here?
+                req_handle: 0,
                 graceful_degradation: None,
                 chan_alloc: None,
                 tx_reporter: prim.tx_reporter.take(),
             }),
+            LAYER2SERVICE_ACKNOWLEDGED_RESPONSE => SapMsgInner::TlaTlDataRespBl(TlDataRespBl {
+                main_address: prim.address,
+                link_id: 0,
+                endpoint_id: 0,
+                tl_sdu: pdu,
+                scrambling_code: 0,
+                pdu_prio: 0,
+                stealing_permission: false,
+                subscriber_class: 0,
+                fcs_flag: false,
+                air_interface_encryption: 0,
+                stealing_repeats_flag: None,
+                data_class_info: None,
+                req_handle: 0,
+            }),
+            LAYER2SERVICE_UNACKNOWLEDGED => SapMsgInner::TlaTlUnitdataReqBl(TlaTlUnitdataReqBl {
+                main_address: prim.address,
+                link_id: 0,
+                endpoint_id: 0,
+                tl_sdu: pdu,
+                stealing_permission: false,
+                subscriber_class: 0,
+                fcs_flag: false,
+                air_interface_encryption: Some(0),
+                packet_data_flag: false,
+                n_tlsdu_repeats: 0,
+                data_class_info: None,
+                req_handle: 0,
+            }),
+            other => {
+                tracing::warn!("Unknown LMM layer2service {}, defaulting to acknowledged request", other);
+                SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
+                    main_address: prim.address,
+                    link_id: 0,
+                    endpoint_id: 0,
+                    tl_sdu: pdu,
+                    stealing_permission: false,
+                    subscriber_class: 0,
+                    fcs_flag: false,
+                    air_interface_encryption: None,
+                    stealing_repeats_flag: None,
+                    data_class_info: None,
+                    req_handle: 0,
+                    graceful_degradation: None,
+                    chan_alloc: None,
+                    tx_reporter: prim.tx_reporter.take(),
+                })
+            }
+        };
+        let sapmsg = SapMsg {
+            sap: Sap::TlaSap,
+            src: TetraEntity::Mle,
+            dest: TetraEntity::Llc,
+            dltime: message.dltime,
+            msg,
         };
         queue.push_back(sapmsg);
     }
@@ -374,27 +428,78 @@ impl MleBs {
         // Take Channel Allocation Request if any
         let chan_alloc = prim.chan_alloc.take();
 
-        let sapmsg = SapMsg {
-            sap: Sap::TlaSap,
-            src: TetraEntity::Mle,
-            dest: TetraEntity::Llc,
-            dltime: message.dltime,
-            msg: SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
+        let msg = match prim.layer2service {
+            LAYER2SERVICE_ACKNOWLEDGED_REQUEST => SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
                 main_address: prim.main_address,
                 link_id: prim.link_id,
                 endpoint_id: prim.endpoint_id,
                 tl_sdu: pdu,
                 stealing_permission: prim.stealing_permission,
-                subscriber_class: 0, // TODO fixme
+                subscriber_class: 0,
                 fcs_flag: false,
                 air_interface_encryption: None,
                 stealing_repeats_flag: None,
                 data_class_info: None,
-                req_handle: 0, // TODO FIXME
+                req_handle: 0,
                 graceful_degradation: None,
                 chan_alloc,
                 tx_reporter: prim.tx_reporter.take(),
             }),
+            LAYER2SERVICE_ACKNOWLEDGED_RESPONSE => SapMsgInner::TlaTlDataRespBl(TlDataRespBl {
+                main_address: prim.main_address,
+                link_id: prim.link_id,
+                endpoint_id: prim.endpoint_id,
+                tl_sdu: pdu,
+                scrambling_code: 0,
+                pdu_prio: prim.pdu_prio,
+                stealing_permission: prim.stealing_permission,
+                subscriber_class: 0,
+                fcs_flag: false,
+                air_interface_encryption: 0,
+                stealing_repeats_flag: None,
+                data_class_info: None,
+                req_handle: 0,
+            }),
+            LAYER2SERVICE_UNACKNOWLEDGED => SapMsgInner::TlaTlUnitdataReqBl(TlaTlUnitdataReqBl {
+                main_address: prim.main_address,
+                link_id: prim.link_id,
+                endpoint_id: prim.endpoint_id,
+                tl_sdu: pdu,
+                stealing_permission: prim.stealing_permission,
+                subscriber_class: 0,
+                fcs_flag: false,
+                air_interface_encryption: Some(0),
+                packet_data_flag: false,
+                n_tlsdu_repeats: 0,
+                data_class_info: None,
+                req_handle: 0,
+            }),
+            other => {
+                tracing::warn!("Unknown LCMC layer2service {}, defaulting to acknowledged request", other);
+                SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
+                    main_address: prim.main_address,
+                    link_id: prim.link_id,
+                    endpoint_id: prim.endpoint_id,
+                    tl_sdu: pdu,
+                    stealing_permission: prim.stealing_permission,
+                    subscriber_class: 0,
+                    fcs_flag: false,
+                    air_interface_encryption: None,
+                    stealing_repeats_flag: None,
+                    data_class_info: None,
+                    req_handle: 0,
+                    graceful_degradation: None,
+                    chan_alloc,
+                    tx_reporter: prim.tx_reporter.take(),
+                })
+            }
+        };
+        let sapmsg = SapMsg {
+            sap: Sap::TlaSap,
+            src: TetraEntity::Mle,
+            dest: TetraEntity::Llc,
+            dltime: message.dltime,
+            msg,
         };
         queue.push_back(sapmsg);
     }

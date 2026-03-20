@@ -4,7 +4,7 @@ use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, assert_warn, unimplemented_log};
 use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
 use tetra_saps::lmm::LmmMleUnitdataReq;
-use tetra_saps::{SapMsg, SapMsgInner};
+use tetra_saps::{LAYER2SERVICE_ACKNOWLEDGED_RESPONSE, SapMsg, SapMsgInner};
 
 use crate::mm::components::client_state::{MmClientMgr, MmClientState};
 use crate::mm::components::not_supported::make_ul_mm_pdu_function_not_supported;
@@ -246,7 +246,7 @@ impl MmBs {
                 sdu,
                 handle: prim.handle,
                 address: addr,
-                layer2service: 0,
+                layer2service: LAYER2SERVICE_ACKNOWLEDGED_RESPONSE,
                 stealing_permission: false,
                 stealing_repeats_flag: false,
                 encryption_flag: false,
@@ -421,7 +421,7 @@ impl MmBs {
                 sdu,
                 handle: prim.handle,
                 address: addr,
-                layer2service: 0,
+                layer2service: LAYER2SERVICE_ACKNOWLEDGED_RESPONSE,
                 stealing_permission: false,
                 stealing_repeats_flag: false,
                 encryption_flag: false,
