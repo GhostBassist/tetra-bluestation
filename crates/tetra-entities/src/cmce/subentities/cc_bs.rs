@@ -105,12 +105,13 @@ impl CcBsSubentity {
         sdu.seek(0);
         tracing::info!("-> {:?} sdu {}", pdu, sdu.dump_bin());
 
-        // Construct ChanAlloc descriptor for the allocated timeslot
+        // Group call setup adds an assigned traffic resource while preserving
+        // the existing MCCH signaling path for non-FACCH control/SDS.
         let mut timeslots = [false; 4];
         timeslots[ts as usize - 1] = true;
         let chan_alloc = CmceChanAllocReq {
             usage: Some(usage),
-            alloc_type: ChanAllocType::Replace,
+            alloc_type: ChanAllocType::Additional,
             carrier: None,
             timeslots,
             ul_dl_assigned: ul_dl,
@@ -526,7 +527,10 @@ impl CcBsSubentity {
                 stealing_repeats_flag: false,
                 chan_alloc: Some(CmceChanAllocReq {
                     usage: Some(circuit.usage),
-                    alloc_type: ChanAllocType::Replace,
+                    // Add the traffic allocation without replacing the
+                    // existing MCCH, so radios can still exchange SDS and
+                    // other signaling on the common control channel.
+                    alloc_type: ChanAllocType::Additional,
                     carrier: None,
                     timeslots,
                     ul_dl_assigned: UlDlAssignment::Both,
