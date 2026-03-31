@@ -12,8 +12,8 @@ use tetra_pdus::cmce::{
     fields::basic_service_information::BasicServiceInformation,
     pdus::{
         d_call_proceeding::DCallProceeding, d_connect::DConnect, d_release::DRelease, d_setup::DSetup, d_tx_ceased::DTxCeased,
-        d_tx_granted::DTxGranted, u_disconnect::UDisconnect, u_release::URelease, u_setup::USetup, u_tx_ceased::UTxCeased,
-        u_tx_demand::UTxDemand,
+        d_tx_continue::DTxContinue, d_tx_granted::DTxGranted, u_disconnect::UDisconnect, u_release::URelease, u_setup::USetup,
+        u_tx_ceased::UTxCeased, u_tx_demand::UTxDemand,
     },
     structs::cmce_circuit::CmceCircuit,
 };
@@ -1257,6 +1257,10 @@ impl CcBsSubentity {
         };
         let dest_addr = *dest_addr;
 
+        // ETSI WAIT-state transition: signal that the interruption has ceased
+        // before granting the floor to the new speaker.
+        self.send_d_tx_continue_facch(queue, call_id, dest_addr.ssi, ts, false);
+
         // ETSI 14.5.2.2.1 b): Send individual D-TX GRANTED (Granted) to requesting MS FIRST
         let d_tx_granted_individual = DTxGranted {
             call_identifier: call_id,
@@ -1789,6 +1793,28 @@ impl CcBsSubentity {
 
         let mut sdu = BitBuffer::new_autoexpand(30);
         pdu.to_bitbuf(&mut sdu).expect("Failed to serialize DTxGranted");
+        sdu.seek(0);
+        tracing::info!("-> FACCH {:?} sdu {}", pdu, sdu.dump_bin());
+
+        let dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
+        let msg = Self::build_sapmsg_stealing(sdu, self.dltime, dest_addr, ts);
+        queue.push_back(msg);
+    }
+
+    /// Send D-TX CONTINUE via FACCH stealing.
+    fn send_d_tx_continue_facch(&mut self, queue: &mut MessageQueue, call_id: u16, dest_gssi: u32, ts: u8, do_continue: bool) {
+        let pdu = DTxContinue {
+            call_identifier: call_id,
+            do_continue,
+            transmission_request_permission: false,
+            notification_indicator: None,
+            facility: None,
+            dm_ms_address: None,
+            proprietary: None,
+        };
+
+        let mut sdu = BitBuffer::new_autoexpand(24);
+        pdu.to_bitbuf(&mut sdu).expect("Failed to serialize DTxContinue");
         sdu.seek(0);
         tracing::info!("-> FACCH {:?} sdu {}", pdu, sdu.dump_bin());
 
