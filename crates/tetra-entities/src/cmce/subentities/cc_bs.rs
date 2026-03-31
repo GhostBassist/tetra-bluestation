@@ -141,17 +141,10 @@ impl CcBsSubentity {
     fn send_d_connect_for_existing_call(
         queue: &mut MessageQueue,
         dltime: TdmaTime,
-        handle: u32,
-        endpoint_id: u32,
-        link_id: u32,
         calling_party: TetraAddress,
         call_id: u16,
         ts: u8,
-        usage: u8,
     ) {
-        let mut timeslots = [false; 4];
-        timeslots[ts as usize - 1] = true;
-
         let d_connect = DConnect {
             call_identifier: call_id,
             call_time_out: CallTimeout::T5m,
@@ -173,32 +166,7 @@ impl CcBsSubentity {
         connect_sdu.seek(0);
         tracing::info!("-> {:?} sdu {}", d_connect, connect_sdu.dump_bin());
 
-        queue.push_back(SapMsg {
-            sap: Sap::LcmcSap,
-            src: TetraEntity::Cmce,
-            dest: TetraEntity::Mle,
-            dltime,
-            msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
-                sdu: connect_sdu,
-                handle,
-                endpoint_id,
-                link_id,
-                layer2service: Layer2Service::Unacknowledged,
-                pdu_prio: 0,
-                layer2_qos: 0,
-                stealing_permission: false,
-                stealing_repeats_flag: false,
-                chan_alloc: Some(CmceChanAllocReq {
-                    usage: Some(usage),
-                    alloc_type: ChanAllocType::Replace,
-                    carrier: None,
-                    timeslots,
-                    ul_dl_assigned: UlDlAssignment::Both,
-                }),
-                main_address: calling_party,
-                tx_reporter: None,
-            }),
-        });
+        queue.push_back(Self::build_sapmsg_stealing(connect_sdu, dltime, calling_party, ts));
     }
 
     fn resend_cached_d_setup_for_call(&mut self, queue: &mut MessageQueue, dltime: TdmaTime, call_id: u16) {
@@ -486,7 +454,14 @@ impl CcBsSubentity {
         }
     }
 
-    fn send_d_call_proceeding(&mut self, queue: &mut MessageQueue, message: &SapMsg, pdu_request: &USetup, call_id: u16) {
+    fn send_d_call_proceeding(
+        &mut self,
+        queue: &mut MessageQueue,
+        message: &SapMsg,
+        pdu_request: &USetup,
+        call_id: u16,
+        assigned_ts: Option<u8>,
+    ) {
         tracing::trace!("send_d_call_proceeding");
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
@@ -510,29 +485,32 @@ impl CcBsSubentity {
         sdu.seek(0);
         tracing::info!("-> {:?} sdu {}", pdu_response, sdu.dump_bin());
 
-        let msg = SapMsg {
-            sap: Sap::LcmcSap,
-            src: TetraEntity::Cmce,
-            dest: TetraEntity::Mle,
-            dltime: message.dltime,
-            msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
-                sdu,
-                handle: prim.handle,
-                endpoint_id: prim.endpoint_id,
-                link_id: prim.link_id,
-                // Do not require an acknowledged MCCH exchange immediately before
-                // sending channel assignment to the originator. Some radios move to
-                // the assigned channel aggressively and never complete the ACK.
-                layer2service: Layer2Service::Unacknowledged,
-                pdu_prio: 0,
-                layer2_qos: 0,
-                stealing_permission: false,
-                stealing_repeats_flag: false,
-
-                chan_alloc: None,
-                main_address: prim.received_tetra_address,
-                tx_reporter: None,
-            }),
+        let msg = if let Some(ts) = assigned_ts {
+            Self::build_sapmsg_stealing(sdu, self.dltime, prim.received_tetra_address, ts)
+        } else {
+            SapMsg {
+                sap: Sap::LcmcSap,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Mle,
+                dltime: message.dltime,
+                msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
+                    sdu,
+                    handle: prim.handle,
+                    endpoint_id: prim.endpoint_id,
+                    link_id: prim.link_id,
+                    // Do not require an acknowledged MCCH exchange immediately before
+                    // sending channel assignment to the originator. Some radios move to
+                    // the assigned channel aggressively and never complete the ACK.
+                    layer2service: Layer2Service::Unacknowledged,
+                    pdu_prio: 0,
+                    layer2_qos: 0,
+                    stealing_permission: false,
+                    stealing_repeats_flag: false,
+                    chan_alloc: None,
+                    main_address: prim.received_tetra_address,
+                    tx_reporter: None,
+                }),
+            }
         };
         queue.push_back(msg);
     }
@@ -616,22 +594,12 @@ impl CcBsSubentity {
                 dest_gssi
             );
 
-            let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
-                panic!()
-            };
-            let ul_handle = prim.handle;
-            let ul_link_id = prim.link_id;
-            let ul_endpoint_id = prim.endpoint_id;
-
-            self.send_d_call_proceeding(queue, &message, &pdu, call_id);
-
             let Some(call) = self.active_calls.get_mut(&call_id) else {
                 tracing::error!("Existing call_id={} disappeared during U-SETUP handling", call_id);
                 return;
             };
 
             let ts = call.ts;
-            let usage = call.usage;
             let dest_gssi = call.dest_gssi;
             call.tx_active = true;
             call.hangtime_start = None;
@@ -642,19 +610,16 @@ impl CcBsSubentity {
             }
             let _ = call;
 
+            self.send_d_call_proceeding(queue, &message, &pdu, call_id, Some(ts));
             self.update_cached_setup_speaker(call_id, calling_party.ssi);
             self.sync_subscriber_channel_state(call_id);
 
             Self::send_d_connect_for_existing_call(
                 queue,
                 message.dltime,
-                ul_handle,
-                ul_endpoint_id,
-                ul_link_id,
                 calling_party,
                 call_id,
                 ts,
-                usage,
             );
             self.resend_cached_d_setup_for_call(queue, message.dltime, call_id);
 
@@ -733,7 +698,7 @@ impl CcBsSubentity {
 
         // === 1) Send D-CALL-PROCEEDING to the calling MS (individually addressed) ===
         // This acknowledges the U-SETUP and keeps the radio from timing out.
-        self.send_d_call_proceeding(queue, &message, &pdu, circuit.call_id);
+        self.send_d_call_proceeding(queue, &message, &pdu, circuit.call_id, None);
 
         // === 2) Send D-CONNECT to the calling MS with Granted + channel allocation ===
         // This transitions the calling MS from "Call Setup" to "Active".
