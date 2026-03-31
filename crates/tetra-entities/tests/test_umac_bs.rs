@@ -3,8 +3,14 @@ mod common;
 use tetra_config::bluestation::StackMode;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Layer2Service, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, debug};
+use tetra_core::Direction;
+use tetra_saps::control::call_control::{CallControl, Circuit};
+use tetra_saps::control::enums::circuit_mode_type::CircuitModeType;
+use tetra_saps::lcmc::enums::{alloc_type::ChanAllocType, ul_dl_assignment::UlDlAssignment};
+use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
 use tetra_saps::lmm::LmmMleUnitdataReq;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
+use tetra_saps::tma::TmaUnitdataReq;
 use tetra_saps::tmv::{TmvUnitdataInd, enums::logical_chans::LogicalChannel};
 
 use crate::common::ComponentTest;
@@ -171,4 +177,72 @@ fn test_out_fragmented_resource() {
     test.run_stack(Some(8));
 
     tracing::info!("Validation of result not implemented");
+}
+
+#[test]
+fn test_oversized_facch_falls_back_without_panicking() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    let components = vec![TetraEntity::Umac];
+    let sinks: Vec<TetraEntity> = vec![TetraEntity::Lmac];
+    test.populate_entities(components, sinks);
+
+    let open = SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Cmce,
+        dest: TetraEntity::Umac,
+        dltime,
+        msg: SapMsgInner::CmceCallControl(CallControl::Open(Circuit {
+            direction: Direction::Both,
+            ts: 2,
+            usage: 4,
+            circuit_mode: CircuitModeType::TchS,
+            speech_service: Some(0),
+            etee_encrypted: false,
+        })),
+    };
+    test.submit_message(open);
+    test.run_stack(Some(1));
+
+    let msg = SapMsg {
+        sap: Sap::TmaSap,
+        src: TetraEntity::Llc,
+        dest: TetraEntity::Umac,
+        dltime: dltime.forward_to_timeslot(1),
+        msg: SapMsgInner::TmaUnitdataReq(TmaUnitdataReq {
+            req_handle: 0,
+            pdu: BitBuffer::new(96),
+            main_address: TetraAddress::new(2000001, SsiType::Issi),
+            endpoint_id: 0,
+            stealing_permission: true,
+            subscriber_class: 0,
+            air_interface_encryption: None,
+            stealing_repeats_flag: None,
+            data_category: None,
+            chan_alloc: Some(CmceChanAllocReq {
+                usage: None,
+                carrier: None,
+                timeslots: [false, true, false, false],
+                alloc_type: ChanAllocType::Replace,
+                ul_dl_assigned: UlDlAssignment::Both,
+            }),
+            tx_reporter: None,
+        }),
+    };
+    test.submit_message(msg);
+    test.run_stack(Some(2));
+
+    let sink_msgs = test.dump_sinks();
+    assert!(!sink_msgs.is_empty());
+    let slot = sink_msgs
+        .into_iter()
+        .find_map(|m| match m.msg {
+            SapMsgInner::TmvUnitdataReq(slot) => Some(slot),
+            _ => None,
+        })
+        .expect("expected TMV output");
+    let blk1 = slot.blk1.expect("expected first block");
+    assert_ne!(blk1.logical_channel, LogicalChannel::Stch);
 }

@@ -117,8 +117,8 @@ impl CcBsSubentity {
         };
 
         match call.channel_state {
-            GroupChannelState::Mcch => Self::mcch_dltime(self.dltime),
-            GroupChannelState::AssignedTraffic | GroupChannelState::AssignedControl => self.dltime.forward_to_timeslot(call.ts),
+            GroupChannelState::AssignedTraffic => self.dltime.forward_to_timeslot(call.ts),
+            GroupChannelState::Mcch | GroupChannelState::AssignedControl => Self::mcch_dltime(self.dltime),
         }
     }
 

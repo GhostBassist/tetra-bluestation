@@ -1142,27 +1142,39 @@ impl UmacBs {
                     chan_alloc_element: None,
                 };
                 mac_pdu.update_len_and_fill_ind(sdu.get_len());
+                let facch_len_bits = mac_pdu.compute_header_len() + sdu.get_len();
 
-                let mut stch_block = BitBuffer::new(STCH_CAP);
-                mac_pdu.to_bitbuf(&mut stch_block);
+                if facch_len_bits > STCH_CAP {
+                    tracing::warn!(
+                        "rx_ul_tma_unitdata_req: FACCH payload too large for STCH on ts {} (hdr={} sdu={} total={} cap={}), falling back to normal signaling",
+                        ts,
+                        mac_pdu.compute_header_len(),
+                        sdu.get_len(),
+                        facch_len_bits,
+                        STCH_CAP
+                    );
+                } else {
+                    let mut stch_block = BitBuffer::new(STCH_CAP);
+                    mac_pdu.to_bitbuf(&mut stch_block);
 
-                // Copy LLC PDU (BL-DATA) directly — no conversion needed.
-                // Both BL-DATA and BL-UDATA are valid D-LLC-PDU types per the spec.
-                sdu.seek(0);
-                let sdu_len = sdu.get_len();
-                stch_block.copy_bits(&mut sdu, sdu_len);
-                // Remaining bits beyond length_ind are ignored by the receiver.
+                    // Copy LLC PDU (BL-DATA) directly — no conversion needed.
+                    // Both BL-DATA and BL-UDATA are valid D-LLC-PDU types per the spec.
+                    sdu.seek(0);
+                    let sdu_len = sdu.get_len();
+                    stch_block.copy_bits(&mut sdu, sdu_len);
+                    // Remaining bits beyond length_ind are ignored by the receiver.
 
-                tracing::info!(
-                    "rx_ul_tma_unitdata_req: FACCH stealing on ts {} (MAC-RESOURCE + {} SDU bits → {} STCH bits)",
-                    ts,
-                    sdu_len,
-                    stch_block.get_len()
-                );
+                    tracing::info!(
+                        "rx_ul_tma_unitdata_req: FACCH stealing on ts {} (MAC-RESOURCE + {} SDU bits → {} STCH bits)",
+                        ts,
+                        sdu_len,
+                        stch_block.get_len()
+                    );
 
-                self.channel_scheduler.dl_enqueue_stealing(ts, stch_block, prim.tx_reporter);
+                    self.channel_scheduler.dl_enqueue_stealing(ts, stch_block, prim.tx_reporter);
 
-                return;
+                    return;
+                }
             } else {
                 tracing::warn!("rx_ul_tma_unitdata_req: stealing requested but no active DL circuit, falling back to MCCH");
                 // Fall through to normal MCCH path below
