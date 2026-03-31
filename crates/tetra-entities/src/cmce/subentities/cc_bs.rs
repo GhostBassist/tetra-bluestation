@@ -169,6 +169,77 @@ impl CcBsSubentity {
         queue.push_back(Self::build_sapmsg_stealing(connect_sdu, dltime, calling_party, ts));
     }
 
+    fn grant_existing_call_floor(
+        &mut self,
+        queue: &mut MessageQueue,
+        call_id: u16,
+        requesting_party: TetraAddress,
+        send_wait_transition: bool,
+    ) {
+        let Some(call) = self.active_calls.get(&call_id).cloned() else {
+            tracing::error!("No active call for call_id={}", call_id);
+            return;
+        };
+
+        if send_wait_transition {
+            self.send_d_tx_continue_facch(queue, call_id, call.dest_gssi, call.ts, false);
+        }
+
+        let d_tx_granted_individual = DTxGranted {
+            call_identifier: call_id,
+            transmission_grant: TransmissionGrant::Granted.into_raw() as u8,
+            transmission_request_permission: false,
+            encryption_control: false,
+            reserved: false,
+            notification_indicator: None,
+            transmitting_party_type_identifier: Some(1),
+            transmitting_party_address_ssi: Some(requesting_party.ssi as u64),
+            transmitting_party_extension: None,
+            external_subscriber_number: None,
+            facility: None,
+            dm_ms_address: None,
+            proprietary: None,
+        };
+
+        let mut sdu = BitBuffer::new_autoexpand(50);
+        d_tx_granted_individual
+            .to_bitbuf(&mut sdu)
+            .expect("Failed to serialize DTxGranted");
+        sdu.seek(0);
+        tracing::info!("-> {:?} sdu {}", d_tx_granted_individual, sdu.dump_bin());
+
+        queue.push_back(Self::build_sapmsg_stealing(sdu, self.dltime, requesting_party, call.ts));
+        self.send_d_tx_granted_facch(queue, call_id, requesting_party.ssi, call.dest_gssi, call.ts);
+
+        queue.push_back(SapMsg {
+            sap: Sap::Control,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Umac,
+            dltime: self.dltime,
+            msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                call_id,
+                source_issi: requesting_party.ssi,
+                dest_gssi: call.dest_gssi,
+                ts: call.ts,
+            }),
+        });
+
+        if net_brew::is_brew_gssi_routable(&self.config, call.dest_gssi) {
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Brew,
+                dltime: self.dltime,
+                msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                    call_id,
+                    source_issi: requesting_party.ssi,
+                    dest_gssi: call.dest_gssi,
+                    ts: call.ts,
+                }),
+            });
+        }
+    }
+
     fn resend_cached_d_setup_for_call(&mut self, queue: &mut MessageQueue, dltime: TdmaTime, call_id: u16) {
         let Some(call) = self.active_calls.get(&call_id) else {
             tracing::error!("No active call for call_id={}", call_id);
@@ -599,8 +670,18 @@ impl CcBsSubentity {
                 return;
             };
 
+            if call.tx_active && call.source_issi != calling_party.ssi {
+                tracing::warn!(
+                    "rx_u_setup: ISSI {} attempted to re-enter call_id={} while ISSI {} is already transmitting",
+                    calling_party.ssi,
+                    call_id,
+                    call.source_issi
+                );
+                return;
+            }
+
             let ts = call.ts;
-            let dest_gssi = call.dest_gssi;
+            let was_in_hangtime = !call.tx_active && call.hangtime_start.is_some();
             call.tx_active = true;
             call.hangtime_start = None;
             call.source_issi = calling_party.ssi;
@@ -614,41 +695,23 @@ impl CcBsSubentity {
             self.update_cached_setup_speaker(call_id, calling_party.ssi);
             self.sync_subscriber_channel_state(call_id);
 
-            Self::send_d_connect_for_existing_call(
-                queue,
-                message.dltime,
-                calling_party,
-                call_id,
-                ts,
-            );
-            self.resend_cached_d_setup_for_call(queue, message.dltime, call_id);
-
-            queue.push_back(SapMsg {
-                sap: Sap::Control,
-                src: TetraEntity::Cmce,
-                dest: TetraEntity::Umac,
-                dltime: self.dltime,
-                msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+            if was_in_hangtime {
+                tracing::info!(
+                    "rx_u_setup: treating existing call_id={} re-entry as floor reacquisition on ts {}",
                     call_id,
-                    source_issi: calling_party.ssi,
-                    dest_gssi,
+                    ts
+                );
+                self.grant_existing_call_floor(queue, call_id, calling_party, true);
+            } else {
+                Self::send_d_connect_for_existing_call(
+                    queue,
+                    message.dltime,
+                    calling_party,
+                    call_id,
                     ts,
-                }),
-            });
-
-            if net_brew::is_brew_gssi_routable(&self.config, dest_gssi) {
-                queue.push_back(SapMsg {
-                    sap: Sap::Control,
-                    src: TetraEntity::Cmce,
-                    dest: TetraEntity::Brew,
-                    dltime: self.dltime,
-                    msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
-                        call_id,
-                        source_issi: calling_party.ssi,
-                        dest_gssi,
-                        ts,
-                    }),
-                });
+                );
+                self.resend_cached_d_setup_for_call(queue, message.dltime, call_id);
+                self.grant_existing_call_floor(queue, call_id, calling_party, false);
             }
             return;
         }
