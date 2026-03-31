@@ -130,6 +130,100 @@ impl CcBsSubentity {
         setup.calling_party_address_ssi = Some(source_issi);
     }
 
+    fn find_existing_group_call(&self, dest_gssi: u32) -> Option<u16> {
+        self.active_calls
+            .iter()
+            .filter(|(_, call)| call.dest_gssi == dest_gssi)
+            .max_by_key(|(call_id, call)| (call.tx_active as u8, call.hangtime_start.is_some() as u8, **call_id))
+            .map(|(call_id, _)| *call_id)
+    }
+
+    fn send_d_connect_for_existing_call(
+        queue: &mut MessageQueue,
+        dltime: TdmaTime,
+        handle: u32,
+        endpoint_id: u32,
+        link_id: u32,
+        calling_party: TetraAddress,
+        call_id: u16,
+        ts: u8,
+        usage: u8,
+    ) {
+        let mut timeslots = [false; 4];
+        timeslots[ts as usize - 1] = true;
+
+        let d_connect = DConnect {
+            call_identifier: call_id,
+            call_time_out: CallTimeout::T5m,
+            hook_method_selection: false,
+            simplex_duplex_selection: false,
+            transmission_grant: TransmissionGrant::Granted,
+            transmission_request_permission: false,
+            call_ownership: true,
+            call_priority: None,
+            basic_service_information: None,
+            temporary_address: None,
+            notification_indicator: None,
+            facility: None,
+            proprietary: None,
+        };
+
+        let mut connect_sdu = BitBuffer::new_autoexpand(30);
+        d_connect.to_bitbuf(&mut connect_sdu).expect("Failed to serialize DConnect");
+        connect_sdu.seek(0);
+        tracing::info!("-> {:?} sdu {}", d_connect, connect_sdu.dump_bin());
+
+        queue.push_back(SapMsg {
+            sap: Sap::LcmcSap,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Mle,
+            dltime,
+            msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
+                sdu: connect_sdu,
+                handle,
+                endpoint_id,
+                link_id,
+                layer2service: Layer2Service::Unacknowledged,
+                pdu_prio: 0,
+                layer2_qos: 0,
+                stealing_permission: false,
+                stealing_repeats_flag: false,
+                chan_alloc: Some(CmceChanAllocReq {
+                    usage: Some(usage),
+                    alloc_type: ChanAllocType::Replace,
+                    carrier: None,
+                    timeslots,
+                    ul_dl_assigned: UlDlAssignment::Both,
+                }),
+                main_address: calling_party,
+                tx_reporter: None,
+            }),
+        });
+    }
+
+    fn resend_cached_d_setup_for_call(&mut self, queue: &mut MessageQueue, dltime: TdmaTime, call_id: u16) {
+        let Some(call) = self.active_calls.get(&call_id) else {
+            tracing::error!("No active call for call_id={}", call_id);
+            return;
+        };
+        let Some((d_setup, dest_addr, _)) = self.cached_setups.get(&call_id) else {
+            tracing::error!("No cached D-SETUP for call_id={}", call_id);
+            return;
+        };
+
+        let (setup_sdu, setup_chan_alloc) =
+            Self::build_d_setup_prim(d_setup, call.usage, call.ts, UlDlAssignment::Both);
+        let setup_msg = Self::build_sapmsg(
+            setup_sdu,
+            Some(setup_chan_alloc),
+            Self::mcch_dltime(dltime),
+            *dest_addr,
+            Layer2Service::Unacknowledged,
+            None,
+        );
+        queue.push_back(setup_msg);
+    }
+
     fn subscriber_channel_state(call_id: u16, call: &ActiveCall) -> SubscriberChannelState {
         match call.channel_state {
             GroupChannelState::Mcch => SubscriberChannelState::Mcch,
@@ -511,6 +605,86 @@ impl CcBsSubentity {
                 calling_party.ssi,
                 dest_gssi
             );
+            return;
+        }
+
+        if let Some(call_id) = self.find_existing_group_call(dest_gssi) {
+            tracing::info!(
+                "rx_u_setup: ISSI {} re-entering existing call_id={} for GSSI {}",
+                calling_party.ssi,
+                call_id,
+                dest_gssi
+            );
+
+            let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
+                panic!()
+            };
+            let ul_handle = prim.handle;
+            let ul_link_id = prim.link_id;
+            let ul_endpoint_id = prim.endpoint_id;
+
+            self.send_d_call_proceeding(queue, &message, &pdu, call_id);
+
+            let Some(call) = self.active_calls.get_mut(&call_id) else {
+                tracing::error!("Existing call_id={} disappeared during U-SETUP handling", call_id);
+                return;
+            };
+
+            let ts = call.ts;
+            let usage = call.usage;
+            let dest_gssi = call.dest_gssi;
+            call.tx_active = true;
+            call.hangtime_start = None;
+            call.source_issi = calling_party.ssi;
+            call.channel_state = GroupChannelState::AssignedTraffic;
+            if let CallOrigin::Local { caller_addr } = &mut call.origin {
+                *caller_addr = calling_party;
+            }
+            let _ = call;
+
+            self.update_cached_setup_speaker(call_id, calling_party.ssi);
+            self.sync_subscriber_channel_state(call_id);
+
+            Self::send_d_connect_for_existing_call(
+                queue,
+                message.dltime,
+                ul_handle,
+                ul_endpoint_id,
+                ul_link_id,
+                calling_party,
+                call_id,
+                ts,
+                usage,
+            );
+            self.resend_cached_d_setup_for_call(queue, message.dltime, call_id);
+
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Umac,
+                dltime: self.dltime,
+                msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                    call_id,
+                    source_issi: calling_party.ssi,
+                    dest_gssi,
+                    ts,
+                }),
+            });
+
+            if net_brew::is_brew_gssi_routable(&self.config, dest_gssi) {
+                queue.push_back(SapMsg {
+                    sap: Sap::Control,
+                    src: TetraEntity::Cmce,
+                    dest: TetraEntity::Brew,
+                    dltime: self.dltime,
+                    msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                        call_id,
+                        source_issi: calling_party.ssi,
+                        dest_gssi,
+                        ts,
+                    }),
+                });
+            }
             return;
         }
 

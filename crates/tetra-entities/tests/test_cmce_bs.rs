@@ -5,8 +5,10 @@ use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, TxState, debug};
 use tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier;
 use tetra_pdus::cmce::fields::basic_service_information::BasicServiceInformation;
+use tetra_pdus::cmce::pdus::d_connect::DConnect;
 use tetra_pdus::cmce::pdus::u_setup::USetup;
 use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
+use tetra_saps::control::call_control::CallControl;
 use tetra_saps::control::enums::circuit_mode_type::CircuitModeType;
 use tetra_saps::control::enums::communication_type::CommunicationType;
 use tetra_saps::lcmc::LcmcMleUnitdataInd;
@@ -125,6 +127,27 @@ fn count_d_setups(msgs: &[SapMsg]) -> usize {
         .count()
 }
 
+fn count_umac_opens(msgs: &[SapMsg]) -> usize {
+    msgs.iter()
+        .filter(|msg| {
+            msg.dest == TetraEntity::Umac
+                && matches!(&msg.msg, SapMsgInner::CmceCallControl(CallControl::Open(_)))
+        })
+        .count()
+}
+
+fn extract_d_connect_call_ids(msgs: &[SapMsg]) -> Vec<u16> {
+    msgs.iter()
+        .filter_map(|msg| {
+            let SapMsgInner::LcmcMleUnitdataReq(prim) = &msg.msg else {
+                return None;
+            };
+            let mut sdu = prim.sdu.clone();
+            DConnect::from_bitbuf(&mut sdu).ok().map(|pdu| pdu.call_identifier)
+        })
+        .collect()
+}
+
 /// Test that late-entry D-SETUP re-sends are throttled when the previous
 /// D-SETUP's TxReceipt is still in Pending state (UMAC hasn't transmitted it yet),
 /// and that they resume once the receipt reaches a final state.
@@ -194,5 +217,37 @@ fn test_dsetup_late_entry_throttle() {
         new_reporters.len(),
         unthrottled_count,
         "Each re-sent D-SETUP should carry a fresh tx_reporter"
+    );
+}
+
+#[test]
+fn test_second_u_setup_reuses_existing_group_call() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+
+    let components = vec![TetraEntity::Cmce];
+    let sinks = vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew];
+    test.populate_entities(components, sinks);
+
+    register_subscriber(&mut test, dltime, TEST_ISSI, TEST_GSSI);
+
+    let first_setup = build_u_setup_msg(dltime, TEST_ISSI, TEST_GSSI);
+    test.submit_message(first_setup);
+    test.run_stack(Some(1));
+    let first_msgs = test.dump_sinks();
+    assert_eq!(count_umac_opens(&first_msgs), 1, "first setup should open one circuit");
+
+    let second_issi = TEST_ISSI + 1;
+    let second_setup = build_u_setup_msg(dltime, second_issi, TEST_GSSI);
+    test.submit_message(second_setup);
+    test.run_stack(Some(1));
+    let second_msgs = test.dump_sinks();
+
+    assert_eq!(count_umac_opens(&second_msgs), 0, "second setup for same GSSI should reuse existing circuit");
+    assert!(
+        !extract_d_connect_call_ids(&second_msgs).is_empty(),
+        "second setup should still receive a D-CONNECT on the existing call"
     );
 }
