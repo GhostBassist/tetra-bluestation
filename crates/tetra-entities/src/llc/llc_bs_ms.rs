@@ -123,59 +123,59 @@ impl Llc {
         ns
     }
 
-    /// Returns and removes the expected ACK entry for the given SSI, if any
-    fn take_expected_ack_for_ssi(&mut self, ssi: u32) -> Option<ExpectedInAck> {
-        for i in 0..self.outbound_messages.len() {
-            let msg = &self.outbound_messages[i];
-            if msg.addr.ssi == ssi && msg.t_submitted_to_umac.is_some() {
-                return self.outbound_messages.remove(i);
+    /// Process incoming ACK per ETSI 22.3.2.3(k).
+    /// Matches by SSI and N(R) without removing unrelated outstanding PDUs.
+    fn process_incoming_ack(&mut self, addr: TetraAddress, nr: u8) {
+        let mut matching_done_idx = None;
+        let mut submitted_not_done = false;
+        let mut submitted_other_ns = None;
+
+        for (idx, msg) in self.outbound_messages.iter().enumerate() {
+            if msg.addr.ssi != addr.ssi || msg.t_submitted_to_umac.is_none() {
+                continue;
+            }
+
+            if msg.ns == nr {
+                if msg.t_umac_done.is_some() {
+                    matching_done_idx = Some(idx);
+                    break;
+                }
+                submitted_not_done = true;
+                continue;
+            }
+
+            if submitted_other_ns.is_none() {
+                submitted_other_ns = Some(msg.ns);
             }
         }
-        None
-    }
 
-    /// Process incoming ACK per ETSI 22.3.2.3(k).
-    /// Matches by SSI and N(R) so that retransmitted BL-DATA entries are matched correctly.
-    fn process_incoming_ack(&mut self, addr: TetraAddress, nr: u8) {
-        // Get the expected ACK entry
-        let Some(expected_ack) = self.take_expected_ack_for_ssi(addr.ssi) else {
-            tracing::warn!("received unexpected ACK for SSI {} N(R) {}", addr.ssi, nr);
+        if let Some(idx) = matching_done_idx {
+            let expected_ack = self.outbound_messages.remove(idx).expect("index just found");
+            tracing::debug!("received ACK for SSI {} N(R) {}", addr.ssi, nr);
+            expected_ack.tx_reporter.mark_acknowledged();
             return;
-        };
+        }
 
-        // Check it was indeed already transmitted by the Umac
-        if expected_ack.t_umac_done.is_none() {
-            // This may be an old retransmission of an ack for the before-last basic link message
-            // Let's push the ack back into the head of the queue (not tail)..
+        if submitted_not_done {
             tracing::warn!(
                 "received ACK for SSI {} N(R) {} that was not yet transmitted by Umac. Ignoring",
                 addr.ssi,
                 nr
             );
-            self.outbound_messages.push_front(expected_ack);
             return;
         }
 
-        // Check N(R)
-        if expected_ack.ns == nr {
-            // Successful ACK: N(R) matches N(S)
-            tracing::debug!("received ACK for SSI {} N(R) {}", addr.ssi, expected_ack.ns);
-            expected_ack.tx_reporter.mark_acknowledged();
-            return;
-        } else {
-            // N(R) mismatch — per ETSI 22.3.2.3(k), not a successful ACK. Maybe a retransmission?
-            // Let's push it back into the queue head (not the tail) and see if an ack arrives later
+        if let Some(expected_ns) = submitted_other_ns {
             tracing::warn!(
                 "received unexpected ACK for SSI {}: N(R)={}, expected N(S)={}. Ignoring",
                 addr.ssi,
                 nr,
-                expected_ack.ns
+                expected_ns
             );
-            self.outbound_messages.push_front(expected_ack);
             return;
         }
 
-        // The expected_ack is confirmed as matched and goes out of scope here
+        tracing::warn!("received unexpected ACK for SSI {} N(R) {}", addr.ssi, nr);
     }
 
     fn rx_tma_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {
@@ -608,7 +608,12 @@ impl Llc {
         // Remove any expired entries
         if let Some(removals) = removals {
             for ssi in removals {
-                let ack = self.take_expected_ack_for_ssi(ssi).unwrap(); // Never fails
+                let idx = self
+                    .outbound_messages
+                    .iter()
+                    .position(|msg| msg.addr.ssi == ssi && msg.t_submitted_to_umac.is_some())
+                    .expect("expected outstanding ACK entry for SSI");
+                let ack = self.outbound_messages.remove(idx).expect("index just found");
                 tracing::warn!(
                     "schedule_retransmissions: SSI {} N(S) {} exhausted retransmissions",
                     ack.addr.ssi,
