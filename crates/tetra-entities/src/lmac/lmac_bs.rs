@@ -52,8 +52,9 @@ pub struct LmacBs {
     /// keep this keyed by timeslot rather than a single "latest" value.
     uplink_phy_chan: [PhysicalChannel; 4],
 
-    /// Signalled by Umac per timeslot. Set to true when in a traffic burst, the 1st stolen block shows that the 2nd slot is also stolen
-    blk2_stolen: bool,
+    /// Signalled by UMAC per timeslot. Set to true when block1 of a traffic
+    /// burst indicates that block2 is also stolen.
+    blk2_stolen: [bool; 4],
     // Details about current burst, parsed from BBK broadcast block
     // cur_burst: CurBurst,
 }
@@ -83,7 +84,7 @@ impl LmacBs {
 
             dltime: TdmaTime::default(),
             uplink_phy_chan: [PhysicalChannel::Unallocated; 4],
-            blk2_stolen: false,
+            blk2_stolen: [false; 4],
         }
     }
 
@@ -266,17 +267,41 @@ impl LmacBs {
         // let pchan = self.determine_phy_chan_ul();
         let ts_idx = ul_time.t as usize - 1;
         let pchan = self.uplink_phy_chan[ts_idx];
-        let lchan = Self::determine_logical_channel_ul(&prim, pchan == PhysicalChannel::Tp, self.blk2_stolen);
+        let mut blk2_stolen = self.blk2_stolen[ts_idx];
+
+        if prim.block_num == PhyBlockNum::Block1 && blk2_stolen {
+            tracing::warn!(
+                "rx_tp_prim: clearing stale blk2_stolen for ts {} before block1",
+                ul_time.t
+            );
+            blk2_stolen = false;
+            self.blk2_stolen[ts_idx] = false;
+        }
+
+        if pchan != PhysicalChannel::Tp && blk2_stolen {
+            tracing::warn!(
+                "rx_tp_prim: clearing stale blk2_stolen for non-traffic burst on ts {}",
+                ul_time.t
+            );
+            blk2_stolen = false;
+            self.blk2_stolen[ts_idx] = false;
+        }
+
+        let lchan = Self::determine_logical_channel_ul(&prim, pchan == PhysicalChannel::Tp, blk2_stolen);
 
         // Sanity checks
-        assert!(
-            prim.block_num != PhyBlockNum::Block1 || !self.blk2_stolen,
+        debug_assert!(
+            prim.block_num != PhyBlockNum::Block1 || !blk2_stolen,
             "blk2_stolen must be false when receiving block1"
         );
-        assert!(
-            pchan == PhysicalChannel::Tp || !self.blk2_stolen,
+        debug_assert!(
+            pchan == PhysicalChannel::Tp || !blk2_stolen,
             "blk2_stolen must be false when not in a traffic burst"
         );
+
+        if prim.block_num == PhyBlockNum::Block2 {
+            self.blk2_stolen[ts_idx] = false;
+        }
 
         match lchan {
             LogicalChannel::Clch => {}
@@ -297,7 +322,8 @@ impl LmacBs {
             panic!()
         };
         if let Some(stolen) = prim.blk2_stolen {
-            self.blk2_stolen = stolen;
+            let ts_idx = message.dltime.t as usize - 1;
+            self.blk2_stolen[ts_idx] = stolen;
         }
     }
 
@@ -446,6 +472,6 @@ impl TetraEntityTrait for LmacBs {
 
     fn tick_start(&mut self, _queue: &mut MessageQueue, ts: TdmaTime) {
         self.dltime = ts;
-        self.blk2_stolen = false; // reset in case it was set during this tick
+        self.blk2_stolen = [false; 4];
     }
 }
