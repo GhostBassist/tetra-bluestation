@@ -426,7 +426,10 @@ impl CcBsSubentity {
                 handle: prim.handle,
                 endpoint_id: prim.endpoint_id,
                 link_id: prim.link_id,
-                layer2service: Layer2Service::Acknowledged,
+                // Do not require an acknowledged MCCH exchange immediately before
+                // sending channel assignment to the originator. Some radios move to
+                // the assigned channel aggressively and never complete the ACK.
+                layer2service: Layer2Service::Unacknowledged,
                 pdu_prio: 0,
                 layer2_qos: 0,
                 stealing_permission: false,
