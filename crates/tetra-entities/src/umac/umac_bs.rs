@@ -65,10 +65,10 @@ pub struct UmacBs {
 }
 
 struct PendingStch {
+    ts: u8,
     addr: TetraAddress,
     scrambling_code: u32,
     encrypted: bool,
-    fill_bits: bool,
     sdu_part: BitBuffer,
 }
 
@@ -312,38 +312,40 @@ impl UmacBs {
 
         // Iterate until no more messages left in mac block
         loop {
-            // let (lchan, block_num) = match &message.msg {
-            //     SapMsgInner::TmvUnitdataInd(prim) => (prim.logical_channel, prim.block_num),
-            //     _ => panic!(),
-            // };
-
-            // Handle STCH MAC-DATA spanning block1+block2 (length_ind=0b111110)
-            // if lchan == LogicalChannel::Stch {
-            //     if block_num == PhyBlockNum::Block2 {
-            //         if let Some(pending) = self.pending_stch.take() {
-            //             self.rx_stch_second_half(queue, &mut message, pending);
-            //             break;
-            //         }
-            //     } else if self.pending_stch.is_some() {
-            //         tracing::warn!(
-            //             "rx_tmv_sch: pending STCH second-half but got {:?} on ts {}",
-            //             block_num,
-            //             message.dltime.t
-            //         );
-            //         self.pending_stch = None;
-            //     }
-            // }
-
             // Extract info from inner block
             let SapMsgInner::TmvUnitdataInd(prim) = &message.msg else {
                 panic!()
             };
+            let block_num = prim.block_num;
             let Some(bits) = prim.pdu.peek_bits(3) else {
                 tracing::warn!("insufficient bits: {}", prim.pdu.dump_bin());
                 return;
             };
             let orig_start = prim.pdu.get_raw_start();
             let lchan = prim.logical_channel;
+
+            if lchan == LogicalChannel::Stch {
+                if block_num == PhyBlockNum::Block2 {
+                    if let Some(pending) = self.pending_stch.take() {
+                        if pending.ts == message.dltime.t {
+                            self.rx_stch_second_half(queue, &mut message, pending);
+                            break;
+                        }
+                        tracing::warn!(
+                            "rx_tmv_sch: discarding pending STCH second-half for ts {}, got ts {}",
+                            pending.ts,
+                            message.dltime.t
+                        );
+                    }
+                } else if self.pending_stch.as_ref().is_some_and(|pending| pending.ts == message.dltime.t) {
+                    tracing::warn!(
+                        "rx_tmv_sch: pending STCH second-half but got {:?} on ts {}",
+                        block_num,
+                        message.dltime.t
+                    );
+                    self.pending_stch = None;
+                }
+            }
 
             // Clause 21.4.1; handling differs between SCH_HU and others
             match lchan {
@@ -502,6 +504,21 @@ impl UmacBs {
             num_fill_bits,
             prim.pdu.dump_bin_full(true)
         );
+
+        if second_half_stolen {
+            let sdu_part = BitBuffer::from_bitbuffer_pos(&prim.pdu);
+            self.pending_stch = Some(PendingStch {
+                ts: message.dltime.t,
+                addr,
+                scrambling_code: prim.scrambling_code,
+                encrypted: pdu.encrypted,
+                sdu_part,
+            });
+            prim.pdu.set_raw_end(orig_end);
+            prim.pdu.set_raw_pos(prim.pdu.get_raw_start() + pdu_len_bits + num_fill_bits);
+            prim.pdu.set_raw_start(prim.pdu.get_raw_pos());
+            return;
+        }
 
         if is_null_pdu {
             // TODO not sure if there is scenarios in which we want to pass a null pdu to the LLC
@@ -1402,27 +1419,60 @@ impl UmacBs {
         queue.push_prio(m, MessagePrio::Immediate);
     }
 
-    // fn rx_stch_second_half(&mut self, queue: &mut MessageQueue, message: &mut SapMsg, pending: PendingStch) {
-    //     let SapMsgInner::TmvUnitdataInd(prim) = &mut message.msg else {
-    //         panic!()
-    //     };
+    fn rx_stch_second_half(&mut self, queue: &mut MessageQueue, message: &mut SapMsg, pending: PendingStch) {
+        let SapMsgInner::TmvUnitdataInd(prim) = &mut message.msg else {
+            panic!()
+        };
 
-    //     // Sanity checks
-    //     assert!(prim.logical_channel == LogicalChannel::Stch, "rx_stch_second_half: expected STCH logical channel, got {:?}", prim.logical_channel);
-    //     assert!(prim.block_num == PhyBlockNum::Block2, "rx_stch_second_half: expected Block2, got {:?}", prim.block_num);
-    //     assert!(self.pending_stch.is_some(), "rx_stch_second_half: no pending STCH, cannot process second half");
+        assert!(
+            prim.logical_channel == LogicalChannel::Stch,
+            "rx_stch_second_half: expected STCH logical channel, got {:?}",
+            prim.logical_channel
+        );
+        assert!(
+            prim.block_num == PhyBlockNum::Block2,
+            "rx_stch_second_half: expected Block2, got {:?}",
+            prim.block_num
+        );
 
-    //     let mut first = pending.sdu_part;
-    //     first.seek(0);
-    //     let first_len = first.get_len_remaining();
-    //     prim.pdu.seek(0);
-    //     let second_len = prim.pdu.get_len_remaining();
+        let mut first = pending.sdu_part;
+        first.seek(0);
+        prim.pdu.seek(0);
 
-    //     self.rx_mac_access(queue, message);
+        let first_len = first.get_len_remaining();
+        let second_len = prim.pdu.get_len_remaining();
+        let mut combined = BitBuffer::new(first_len + second_len);
+        combined.copy_bits(&mut first, first_len);
+        combined.copy_bits(&mut prim.pdu, second_len);
+        combined.seek(0);
 
-    //     let mut combined = BitBuffer::new(first_len + second_len);
-    //     combined.copy_bits(&mut first, first_len);
-    //     combined.copy_bits(&mut prim.pdu, second_len);
+        tracing::debug!(
+            "rx_stch_second_half: ts {} combined {} + {} bits for {}",
+            pending.ts,
+            first_len,
+            second_len,
+            pending.addr
+        );
+
+        queue.push_back(SapMsg {
+            sap: Sap::TmaSap,
+            src: TetraEntity::Umac,
+            dest: TetraEntity::Llc,
+            dltime: message.dltime,
+            msg: SapMsgInner::TmaUnitdataInd(TmaUnitdataInd {
+                pdu: Some(combined),
+                main_address: pending.addr,
+                scrambling_code: pending.scrambling_code,
+                endpoint_id: 0,
+                new_endpoint_id: None,
+                css_endpoint_id: None,
+                air_interface_encryption: pending.encrypted as Todo,
+                chan_change_response_req: false,
+                chan_change_handle: None,
+                chan_info: None,
+            }),
+        });
+    }
     //     combined.seek(0);
 
     //     if pending.fill_bits {
