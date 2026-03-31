@@ -331,6 +331,11 @@ impl SdsBsSubentity {
 
         let dest_addr = TetraAddress::new(dest_issi, SsiType::Issi);
         let (route_dltime, stealing_permission, chan_alloc) = self.resolve_delivery_path(dltime, dest_issi, SsiType::Issi);
+        let layer2service = if stealing_permission {
+            Layer2Service::Unacknowledged
+        } else {
+            Layer2Service::Todo
+        };
         let msg = SapMsg {
             sap: Sap::LcmcSap,
             src: TetraEntity::Cmce,
@@ -341,7 +346,7 @@ impl SdsBsSubentity {
                 handle: 0,
                 endpoint_id: 0,
                 link_id: 0,
-                layer2service: Layer2Service::Todo,
+                layer2service,
                 pdu_prio: 0,
                 layer2_qos: 0,
                 stealing_permission,
@@ -382,13 +387,19 @@ impl SdsBsSubentity {
         }
         sdu.seek(0);
 
+        let (route_dltime, stealing_permission, chan_alloc) = self.resolve_delivery_path(dltime, dest_ssi, dest_ssi_type);
         let dest_addr = TetraAddress::new(dest_ssi, dest_ssi_type);
         let layer2service = match dest_ssi_type {
-            SsiType::Issi => Layer2Service::Acknowledged,
+            SsiType::Issi => {
+                if stealing_permission {
+                    Layer2Service::Unacknowledged
+                } else {
+                    Layer2Service::Acknowledged
+                }
+            }
             SsiType::Gssi => Layer2Service::Unacknowledged,
             _ => panic!(),
         };
-        let (route_dltime, stealing_permission, chan_alloc) = self.resolve_delivery_path(dltime, dest_ssi, dest_ssi_type);
         let msg = SapMsg {
             sap: Sap::LcmcSap,
             src: TetraEntity::Cmce,
