@@ -1,11 +1,19 @@
 use std::collections::{HashMap, HashSet};
 use tetra_core::TimeslotAllocator;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriberChannelState {
+    Mcch,
+    AssignedTraffic { call_id: u16, gssi: u32, ts: u8 },
+    AssignedControl { call_id: u16, gssi: u32, ts: u8 },
+}
+
 #[derive(Debug, Clone)]
 pub struct Subscriber {
     pub issi: u32,
     // Set of attached GSSIs
     pub attached_groups: HashSet<u32>,
+    pub channel_state: SubscriberChannelState,
 }
 
 /// Centralized subscriber registry tracking locally registered ISSIs and their group affiliations.
@@ -37,6 +45,7 @@ impl SubscriberRegistry {
             Subscriber {
                 issi,
                 attached_groups: HashSet::new(),
+                channel_state: SubscriberChannelState::Mcch,
             },
         );
     }
@@ -46,7 +55,94 @@ impl SubscriberRegistry {
         self.subscribers.entry(issi).or_insert_with(|| Subscriber {
             issi,
             attached_groups: HashSet::new(),
+            channel_state: SubscriberChannelState::Mcch,
         })
+    }
+
+    pub fn get_channel_state(&self, issi: u32) -> Option<SubscriberChannelState> {
+        self.subscribers.get(&issi).map(|subscriber| subscriber.channel_state)
+    }
+
+    pub fn set_channel_state(&mut self, issi: u32, channel_state: SubscriberChannelState) {
+        self.get_subscriber_mut(issi).channel_state = channel_state;
+    }
+
+    pub fn clear_channel_state(&mut self, issi: u32) {
+        if let Some(subscriber) = self.subscribers.get_mut(&issi) {
+            subscriber.channel_state = SubscriberChannelState::Mcch;
+        }
+    }
+
+    pub fn clear_channel_state_if_call(&mut self, issi: u32, call_id: u16) {
+        let Some(subscriber) = self.subscribers.get_mut(&issi) else {
+            return;
+        };
+
+        let matches_call = match subscriber.channel_state {
+            SubscriberChannelState::AssignedTraffic { call_id: active_call_id, .. }
+            | SubscriberChannelState::AssignedControl { call_id: active_call_id, .. } => active_call_id == call_id,
+            SubscriberChannelState::Mcch => false,
+        };
+
+        if matches_call {
+            subscriber.channel_state = SubscriberChannelState::Mcch;
+        }
+    }
+
+    pub fn set_group_channel_state(&mut self, gssi: u32, channel_state: SubscriberChannelState) {
+        for subscriber in self.subscribers.values_mut() {
+            if subscriber.attached_groups.contains(&gssi) {
+                subscriber.channel_state = channel_state;
+            }
+        }
+    }
+
+    pub fn clear_group_channel_state_if_call(&mut self, gssi: u32, call_id: u16) {
+        for subscriber in self.subscribers.values_mut() {
+            if !subscriber.attached_groups.contains(&gssi) {
+                continue;
+            }
+
+            let matches_call = match subscriber.channel_state {
+                SubscriberChannelState::AssignedTraffic {
+                    call_id: active_call_id,
+                    gssi: active_gssi,
+                    ..
+                }
+                | SubscriberChannelState::AssignedControl {
+                    call_id: active_call_id,
+                    gssi: active_gssi,
+                    ..
+                } => active_call_id == call_id && active_gssi == gssi,
+                SubscriberChannelState::Mcch => false,
+            };
+
+            if matches_call {
+                subscriber.channel_state = SubscriberChannelState::Mcch;
+            }
+        }
+    }
+
+    pub fn get_group_channel_state(&self, gssi: u32) -> Option<SubscriberChannelState> {
+        let mut assigned_control = None;
+
+        for subscriber in self.subscribers.values() {
+            if !subscriber.attached_groups.contains(&gssi) {
+                continue;
+            }
+
+            match subscriber.channel_state {
+                state @ SubscriberChannelState::AssignedTraffic { .. } => return Some(state),
+                state @ SubscriberChannelState::AssignedControl { .. } => {
+                    if assigned_control.is_none() {
+                        assigned_control = Some(state);
+                    }
+                }
+                SubscriberChannelState::Mcch => {}
+            }
+        }
+
+        assigned_control
     }
 
     /// Deregister an ISSI, removing it from the registry and cleaning up any group affiliations
@@ -164,6 +260,64 @@ mod tests {
         assert!(reg.is_registered(1001));
         reg.deaffiliate(1001, 91);
         assert!(!reg.has_group_members(91));
+    }
+
+    #[test]
+    fn test_channel_state_per_subscriber() {
+        let mut reg = SubscriberRegistry::new();
+        reg.register(1001);
+
+        reg.set_channel_state(
+            1001,
+            SubscriberChannelState::AssignedTraffic {
+                call_id: 18,
+                gssi: 91,
+                ts: 2,
+            },
+        );
+        assert_eq!(
+            reg.get_channel_state(1001),
+            Some(SubscriberChannelState::AssignedTraffic {
+                call_id: 18,
+                gssi: 91,
+                ts: 2,
+            })
+        );
+
+        reg.clear_channel_state_if_call(1001, 18);
+        assert_eq!(reg.get_channel_state(1001), Some(SubscriberChannelState::Mcch));
+    }
+
+    #[test]
+    fn test_group_channel_state_tracks_members() {
+        let mut reg = SubscriberRegistry::new();
+        reg.register(1001);
+        reg.register(1002);
+        reg.affiliate(1001, 91);
+        reg.affiliate(1002, 91);
+
+        reg.set_group_channel_state(
+            91,
+            SubscriberChannelState::AssignedControl {
+                call_id: 18,
+                gssi: 91,
+                ts: 2,
+            },
+        );
+
+        assert_eq!(
+            reg.get_group_channel_state(91),
+            Some(SubscriberChannelState::AssignedControl {
+                call_id: 18,
+                gssi: 91,
+                ts: 2,
+            })
+        );
+
+        reg.clear_group_channel_state_if_call(91, 18);
+        assert_eq!(reg.get_group_channel_state(91), None);
+        assert_eq!(reg.get_channel_state(1001), Some(SubscriberChannelState::Mcch));
+        assert_eq!(reg.get_channel_state(1002), Some(SubscriberChannelState::Mcch));
     }
 }
 

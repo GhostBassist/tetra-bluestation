@@ -1199,11 +1199,13 @@ impl UmacBs {
         };
         pdu.update_len_and_fill_ind(sdu.get_len());
 
-        // // Per ETSI EN 300 392-2 Clause 23.3.1.1.2: idle MSes monitor the MCCH (slot 1)
-        // // for signaling. Without common SCCHs, all MSes listen on slot 1.
-        // // All signaling on the normal path (non-FACCH) must go to the MCCH.
-        if message.dltime.t != 1 {
-            tracing::warn!("rx_ul_tma_unitdata_req: signaling scheduled for non-MCCH {}", message.dltime.t);
+        // Idle MSes monitor the MCCH, but MSes already assigned to an active channel
+        // may legitimately receive non-FACCH signalling on that assigned channel.
+        if message.dltime.t != 1 && !self.channel_scheduler.circuit_is_active(Direction::Dl, message.dltime.t) {
+            tracing::warn!(
+                "rx_ul_tma_unitdata_req: signaling scheduled for non-MCCH {} without an active assigned circuit",
+                message.dltime.t
+            );
         }
         self.channel_scheduler.dl_enqueue_tma(message.dltime.t, pdu, sdu, prim.tx_reporter);
 

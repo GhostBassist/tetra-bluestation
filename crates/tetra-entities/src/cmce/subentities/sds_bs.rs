@@ -1,4 +1,4 @@
-use tetra_config::bluestation::SharedConfig;
+use tetra_config::bluestation::{SharedConfig, SubscriberChannelState};
 use tetra_core::{BitBuffer, Sap, SsiType, TetraAddress, tetra_entities::TetraEntity, unimplemented_log};
 use tetra_core::{Layer2Service, TdmaTime};
 use tetra_pdus::cmce::enums::pre_coded_status::PreCodedStatus;
@@ -6,6 +6,8 @@ use tetra_pdus::cmce::enums::short_report_type::ShortReportType;
 use tetra_saps::control::enums::sds_user_data::SdsUserData;
 use tetra_saps::control::sds::CmceSdsData;
 use tetra_saps::lcmc::LcmcMleUnitdataReq;
+use tetra_saps::lcmc::enums::{alloc_type::ChanAllocType, ul_dl_assignment::UlDlAssignment};
+use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
 use tetra_saps::{SapMsg, SapMsgInner};
 
 use tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier;
@@ -26,6 +28,42 @@ pub struct SdsBsSubentity {
 impl SdsBsSubentity {
     pub fn new(config: SharedConfig) -> Self {
         SdsBsSubentity { config }
+    }
+
+    fn chan_alloc_for_timeslot(ts: u8) -> CmceChanAllocReq {
+        let mut timeslots = [false; 4];
+        timeslots[ts as usize - 1] = true;
+        CmceChanAllocReq {
+            usage: None,
+            alloc_type: ChanAllocType::Replace,
+            carrier: None,
+            timeslots,
+            ul_dl_assigned: UlDlAssignment::Both,
+        }
+    }
+
+    fn resolve_delivery_path(
+        &self,
+        dltime: TdmaTime,
+        dest_ssi: u32,
+        dest_ssi_type: SsiType,
+    ) -> (TdmaTime, bool, Option<CmceChanAllocReq>) {
+        let channel_state = {
+            let state = self.config.state_read();
+            match dest_ssi_type {
+                SsiType::Issi => state.subscribers.get_channel_state(dest_ssi),
+                SsiType::Gssi => state.subscribers.get_group_channel_state(dest_ssi),
+                _ => None,
+            }
+        };
+
+        match channel_state.unwrap_or(SubscriberChannelState::Mcch) {
+            SubscriberChannelState::Mcch => (dltime.forward_to_timeslot(1), false, None),
+            SubscriberChannelState::AssignedControl { ts, .. } => (dltime.forward_to_timeslot(ts), false, None),
+            SubscriberChannelState::AssignedTraffic { ts, .. } => {
+                (dltime.forward_to_timeslot(ts), true, Some(Self::chan_alloc_for_timeslot(ts)))
+            }
+        }
     }
 
     /// Handle incoming U-SDS-DATA from a local MS (via RF uplink)
@@ -113,10 +151,9 @@ impl SdsBsSubentity {
             return;
         }
 
-        // Send D-SDS-DATA downlink to the local MS. Schedule on next ts1 to ensure it gets sent on the MCCH
         self.send_d_sds_data(
             queue,
-            message.dltime.forward_to_timeslot(1),
+            message.dltime,
             sds.source_issi,
             sds.dest_issi,
             SsiType::Issi,
@@ -147,15 +184,24 @@ impl SdsBsSubentity {
             len_bits
         );
 
-        if !self.config.state_read().subscribers.is_registered(dest_ssi) {
-            tracing::warn!("SDS: dest ISSI {} from Control is not locally registered, dropping", dest_ssi);
+        let is_local_dest = if dest_is_group {
+            self.config.state_read().subscribers.has_group_members(dest_ssi)
+        } else {
+            self.config.state_read().subscribers.is_registered(dest_ssi)
+        };
+
+        if !is_local_dest {
+            tracing::warn!(
+                "SDS: dest {} {} from Control is not locally reachable, dropping",
+                if dest_is_group { "GSSI" } else { "ISSI" },
+                dest_ssi
+            );
             return false;
         }
 
-        // Send D-SDS-DATA downlink to the local MS. Schedule on next ts1 to ensure it gets sent on the MCCH
         self.send_d_sds_data(
             queue,
-            TdmaTime::default().forward_to_timeslot(1),
+            TdmaTime::default(),
             source_ssi,
             dest_ssi,
             if dest_is_group { SsiType::Gssi } else { SsiType::Issi },
@@ -284,11 +330,12 @@ impl SdsBsSubentity {
         sdu.seek(0);
 
         let dest_addr = TetraAddress::new(dest_issi, SsiType::Issi);
+        let (route_dltime, stealing_permission, chan_alloc) = self.resolve_delivery_path(dltime, dest_issi, SsiType::Issi);
         let msg = SapMsg {
             sap: Sap::LcmcSap,
             src: TetraEntity::Cmce,
             dest: TetraEntity::Mle,
-            dltime,
+            dltime: route_dltime,
             msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
                 sdu,
                 handle: 0,
@@ -297,9 +344,9 @@ impl SdsBsSubentity {
                 layer2service: Layer2Service::Todo,
                 pdu_prio: 0,
                 layer2_qos: 0,
-                stealing_permission: false,
+                stealing_permission,
                 stealing_repeats_flag: false,
-                chan_alloc: None,
+                chan_alloc,
                 main_address: dest_addr,
                 tx_reporter: None,
             }),
@@ -341,11 +388,12 @@ impl SdsBsSubentity {
             SsiType::Gssi => Layer2Service::Unacknowledged,
             _ => panic!(),
         };
+        let (route_dltime, stealing_permission, chan_alloc) = self.resolve_delivery_path(dltime, dest_ssi, dest_ssi_type);
         let msg = SapMsg {
             sap: Sap::LcmcSap,
             src: TetraEntity::Cmce,
             dest: TetraEntity::Mle,
-            dltime,
+            dltime: route_dltime,
             msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
                 sdu,
                 handle: 0,
@@ -354,9 +402,9 @@ impl SdsBsSubentity {
                 layer2service,
                 pdu_prio: 0,
                 layer2_qos: 0,
-                stealing_permission: false,
+                stealing_permission,
                 stealing_repeats_flag: false,
-                chan_alloc: None,
+                chan_alloc,
                 main_address: dest_addr,
                 tx_reporter: None,
             }),

@@ -2,7 +2,7 @@ mod common;
 
 use std::time::Duration;
 
-use tetra_config::bluestation::{CfgBrew, StackMode};
+use tetra_config::bluestation::{CfgBrew, StackMode, SubscriberChannelState};
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, debug};
 use tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier;
@@ -24,6 +24,14 @@ fn register_subscriber(test: &mut ComponentTest, issi: u32) {
 /// Helper: affiliate a subscriber with a GSSI in the StackState subscriber registry
 fn affiliate_subscriber(test: &mut ComponentTest, issi: u32, gssi: u32) {
     test.config.state_write().subscribers.affiliate(issi, gssi);
+}
+
+fn set_subscriber_channel_state(test: &mut ComponentTest, issi: u32, channel_state: SubscriberChannelState) {
+    test.config.state_write().subscribers.set_channel_state(issi, channel_state);
+}
+
+fn set_group_channel_state(test: &mut ComponentTest, gssi: u32, channel_state: SubscriberChannelState) {
+    test.config.state_write().subscribers.set_group_channel_state(gssi, channel_state);
 }
 
 /// Helper: build a U-SDS-DATA message from a source ISSI to a dest SSI with 16-bit payload
@@ -72,6 +80,15 @@ fn count_brew_sds(msgs: &[SapMsg]) -> usize {
     msgs.iter()
         .filter(|m| m.dest == TetraEntity::Brew && matches!(&m.msg, SapMsgInner::CmceSdsData(_)))
         .count()
+}
+
+fn first_mle_req(msgs: &[SapMsg]) -> &tetra_saps::lcmc::LcmcMleUnitdataReq {
+    msgs.iter()
+        .find_map(|m| match &m.msg {
+            SapMsgInner::LcmcMleUnitdataReq(prim) if m.dest == TetraEntity::Mle => Some(prim),
+            _ => None,
+        })
+        .expect("Expected LcmcMleUnitdataReq")
 }
 
 #[test]
@@ -246,6 +263,131 @@ fn test_sds_group_delivery() {
             }
         }
     }
+}
+
+#[test]
+fn test_sds_from_brew_uses_assigned_control_channel() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+
+    let components = vec![TetraEntity::Cmce];
+    let sinks = vec![TetraEntity::Mle, TetraEntity::Brew];
+    test.populate_entities(components, sinks);
+
+    register_subscriber(&mut test, 2000001);
+    set_subscriber_channel_state(
+        &mut test,
+        2000001,
+        SubscriberChannelState::AssignedControl {
+            call_id: 18,
+            gssi: 91,
+            ts: 2,
+        },
+    );
+
+    let msg = SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        dltime,
+        msg: SapMsgInner::CmceSdsData(CmceSdsData {
+            source_issi: 3000001,
+            dest_issi: 2000001,
+            user_defined_data: SdsUserData::Type1(0xCAFE),
+        }),
+    };
+    test.submit_message(msg);
+    test.run_stack(Some(1));
+
+    let sink_msgs = test.dump_sinks();
+    let prim = first_mle_req(&sink_msgs);
+    assert_eq!(prim.main_address.ssi, 2000001);
+    assert_eq!(prim.main_address.ssi_type, SsiType::Issi);
+    assert!(prim.chan_alloc.is_none());
+    assert!(!prim.stealing_permission);
+    assert_eq!(sink_msgs.iter().find(|m| m.dest == TetraEntity::Mle).unwrap().dltime.t, 2);
+}
+
+#[test]
+fn test_sds_from_brew_uses_facch_for_assigned_traffic() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+
+    let components = vec![TetraEntity::Cmce];
+    let sinks = vec![TetraEntity::Mle, TetraEntity::Brew];
+    test.populate_entities(components, sinks);
+
+    register_subscriber(&mut test, 2000001);
+    set_subscriber_channel_state(
+        &mut test,
+        2000001,
+        SubscriberChannelState::AssignedTraffic {
+            call_id: 18,
+            gssi: 91,
+            ts: 2,
+        },
+    );
+
+    let msg = SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Brew,
+        dest: TetraEntity::Cmce,
+        dltime,
+        msg: SapMsgInner::CmceSdsData(CmceSdsData {
+            source_issi: 3000001,
+            dest_issi: 2000001,
+            user_defined_data: SdsUserData::Type1(0xCAFE),
+        }),
+    };
+    test.submit_message(msg);
+    test.run_stack(Some(1));
+
+    let sink_msgs = test.dump_sinks();
+    let prim = first_mle_req(&sink_msgs);
+    assert!(prim.stealing_permission);
+    assert_eq!(prim.chan_alloc.as_ref().unwrap().timeslots, [false, true, false, false]);
+    assert_eq!(sink_msgs.iter().find(|m| m.dest == TetraEntity::Mle).unwrap().dltime.t, 2);
+}
+
+#[test]
+fn test_group_sds_uses_group_assigned_channel_state() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+
+    let components = vec![TetraEntity::Cmce];
+    let sinks = vec![TetraEntity::Mle, TetraEntity::Brew];
+    test.populate_entities(components, sinks);
+
+    let gssi = 100;
+    register_subscriber(&mut test, 1000001);
+    register_subscriber(&mut test, 1000002);
+    affiliate_subscriber(&mut test, 1000001, gssi);
+    affiliate_subscriber(&mut test, 1000002, gssi);
+    set_group_channel_state(
+        &mut test,
+        gssi,
+        SubscriberChannelState::AssignedControl {
+            call_id: 18,
+            gssi,
+            ts: 2,
+        },
+    );
+
+    let msg = build_u_sds_data_msg(dltime, 1000001, gssi, 0xBEEF);
+    test.submit_message(msg);
+    test.run_stack(Some(1));
+
+    let sink_msgs = test.dump_sinks();
+    let prim = first_mle_req(&sink_msgs);
+    assert_eq!(prim.main_address.ssi, gssi);
+    assert_eq!(prim.main_address.ssi_type, SsiType::Gssi);
+    assert_eq!(sink_msgs.iter().find(|m| m.dest == TetraEntity::Mle).unwrap().dltime.t, 2);
 }
 
 #[test]

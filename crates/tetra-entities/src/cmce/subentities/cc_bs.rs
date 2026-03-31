@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use tetra_config::bluestation::SharedConfig;
+use tetra_config::bluestation::{SharedConfig, SubscriberChannelState};
 use tetra_core::{BitBuffer, Direction, Sap, SsiType, TdmaTime, TetraAddress, tetra_entities::TetraEntity, unimplemented_log};
 use tetra_core::{Layer2Service, TimeslotOwner, TxReporter, TxState};
 use tetra_pdus::cmce::enums::disconnect_cause::DisconnectCause;
@@ -80,6 +80,14 @@ struct ActiveCall {
     /// Brew session UUID — set when a network speaker is active on this call,
     /// regardless of call origin. Cleared when the network speaker ends.
     brew_uuid: Option<uuid::Uuid>,
+    channel_state: GroupChannelState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupChannelState {
+    Mcch,
+    AssignedTraffic,
+    AssignedControl,
 }
 
 impl CcBsSubentity {
@@ -99,19 +107,84 @@ impl CcBsSubentity {
         self.config = config;
     }
 
+    fn mcch_dltime(dltime: TdmaTime) -> TdmaTime {
+        dltime.forward_to_timeslot(1)
+    }
+
+    fn group_control_dltime(&self, call_id: u16) -> TdmaTime {
+        let Some(call) = self.active_calls.get(&call_id) else {
+            return Self::mcch_dltime(self.dltime);
+        };
+
+        match call.channel_state {
+            GroupChannelState::Mcch => Self::mcch_dltime(self.dltime),
+            GroupChannelState::AssignedTraffic | GroupChannelState::AssignedControl => self.dltime.forward_to_timeslot(call.ts),
+        }
+    }
+
+    fn update_cached_setup_speaker(&mut self, call_id: u16, source_issi: u32) {
+        let Some((setup, _, _)) = self.cached_setups.get_mut(&call_id) else {
+            tracing::error!("No cached D-SETUP for call_id={}", call_id);
+            return;
+        };
+        setup.calling_party_address_ssi = Some(source_issi);
+    }
+
+    fn subscriber_channel_state(call_id: u16, call: &ActiveCall) -> SubscriberChannelState {
+        match call.channel_state {
+            GroupChannelState::Mcch => SubscriberChannelState::Mcch,
+            GroupChannelState::AssignedTraffic => SubscriberChannelState::AssignedTraffic {
+                call_id,
+                gssi: call.dest_gssi,
+                ts: call.ts,
+            },
+            GroupChannelState::AssignedControl => SubscriberChannelState::AssignedControl {
+                call_id,
+                gssi: call.dest_gssi,
+                ts: call.ts,
+            },
+        }
+    }
+
+    fn sync_subscriber_channel_state(&mut self, call_id: u16) {
+        let Some(call) = self.active_calls.get(&call_id).cloned() else {
+            return;
+        };
+
+        let channel_state = Self::subscriber_channel_state(call_id, &call);
+        let mut state = self.config.state_write();
+        state.subscribers.set_group_channel_state(call.dest_gssi, channel_state);
+
+        if let CallOrigin::Local { caller_addr } = call.origin {
+            state.subscribers.set_channel_state(caller_addr.ssi, channel_state);
+        }
+    }
+
+    fn clear_subscriber_channel_state(&mut self, call_id: u16) {
+        let Some(call) = self.active_calls.get(&call_id).cloned() else {
+            return;
+        };
+
+        let mut state = self.config.state_write();
+        state.subscribers.clear_group_channel_state_if_call(call.dest_gssi, call_id);
+
+        if let CallOrigin::Local { caller_addr } = call.origin {
+            state.subscribers.clear_channel_state_if_call(caller_addr.ssi, call_id);
+        }
+    }
+
     fn build_d_setup_prim(pdu: &DSetup, usage: u8, ts: u8, ul_dl: UlDlAssignment) -> (BitBuffer, CmceChanAllocReq) {
         let mut sdu = BitBuffer::new_autoexpand(80);
         pdu.to_bitbuf(&mut sdu).expect("Failed to serialize DSetup");
         sdu.seek(0);
         tracing::info!("-> {:?} sdu {}", pdu, sdu.dump_bin());
 
-        // Group call setup adds an assigned traffic resource while preserving
-        // the existing MCCH signaling path for non-FACCH control/SDS.
+        // Construct ChanAlloc descriptor for the allocated timeslot.
         let mut timeslots = [false; 4];
         timeslots[ts as usize - 1] = true;
         let chan_alloc = CmceChanAllocReq {
             usage: Some(usage),
-            alloc_type: ChanAllocType::Additional,
+            alloc_type: ChanAllocType::Replace,
             carrier: None,
             timeslots,
             ul_dl_assigned: ul_dl,
@@ -527,10 +600,7 @@ impl CcBsSubentity {
                 stealing_repeats_flag: false,
                 chan_alloc: Some(CmceChanAllocReq {
                     usage: Some(circuit.usage),
-                    // Add the traffic allocation without replacing the
-                    // existing MCCH, so radios can still exchange SDS and
-                    // other signaling on the common control channel.
-                    alloc_type: ChanAllocType::Additional,
+                    alloc_type: ChanAllocType::Replace,
                     carrier: None,
                     timeslots,
                     ul_dl_assigned: UlDlAssignment::Both,
@@ -572,7 +642,7 @@ impl CcBsSubentity {
         let setup_msg = Self::build_sapmsg(
             setup_sdu,
             Some(setup_chan_alloc),
-            message.dltime,
+            Self::mcch_dltime(message.dltime),
             dest_addr,
             Layer2Service::Unacknowledged,
             None,
@@ -593,8 +663,10 @@ impl CcBsSubentity {
                 tx_active: true,
                 hangtime_start: None,
                 brew_uuid: None,
+                channel_state: GroupChannelState::AssignedTraffic,
             },
         );
+        self.sync_subscriber_channel_state(circuit.call_id);
 
         // Notify Brew entity about this local call if Brew is loaded and the SSI is cleared for Brew
         // It can then forward to TetraPack if the group is subscribed
@@ -709,7 +781,7 @@ impl CcBsSubentity {
                         let prim = Self::build_sapmsg(
                             sdu,
                             Some(chan_alloc),
-                            self.dltime,
+                            Self::mcch_dltime(self.dltime),
                             dest_addr,
                             Layer2Service::Unacknowledged,
                             Some(reporter),
@@ -724,13 +796,23 @@ impl CcBsSubentity {
                         if let Some((pdu, dest_addr, _)) = self.cached_setups.get(&call_id) {
                             let dest_addr = *dest_addr;
                             let sdu = Self::build_d_release_from_d_setup(pdu, DisconnectCause::ExpiryOfTimer);
-                            let prim = Self::build_sapmsg(sdu, None, self.dltime, dest_addr, Layer2Service::Unacknowledged, None);
+                            let prim = if matches!(
+                                self.active_calls.get(&call_id).map(|call| call.channel_state),
+                                Some(GroupChannelState::AssignedTraffic)
+                            ) {
+                                let ts = self.active_calls.get(&call_id).map(|call| call.ts).unwrap_or(1);
+                                Self::build_sapmsg_stealing(sdu, self.dltime, dest_addr, ts)
+                            } else {
+                                let dltime = self.group_control_dltime(call_id);
+                                Self::build_sapmsg(sdu, None, dltime, dest_addr, Layer2Service::Unacknowledged, None)
+                            };
                             queue.push_back(prim);
                         } else {
                             tracing::error!("No cached D-SETUP for call id {}", call_id);
                         }
 
                         // Clean up call state
+                        self.clear_subscriber_channel_state(call_id);
                         self.cached_setups.remove(&call_id);
                         self.active_calls.remove(&call_id);
 
@@ -784,7 +866,16 @@ impl CcBsSubentity {
 
         // Send D-RELEASE to group
         let sdu = Self::build_d_release_from_d_setup(pdu, disconnect_cause);
-        let prim = Self::build_sapmsg(sdu, None, self.dltime, dest_addr, Layer2Service::Unacknowledged, None);
+        let prim = if matches!(
+            self.active_calls.get(&call_id).map(|call| call.channel_state),
+            Some(GroupChannelState::AssignedTraffic)
+        ) {
+            let ts = self.active_calls.get(&call_id).map(|call| call.ts).unwrap_or(1);
+            Self::build_sapmsg_stealing(sdu, self.dltime, dest_addr, ts)
+        } else {
+            let dltime = self.group_control_dltime(call_id);
+            Self::build_sapmsg(sdu, None, dltime, dest_addr, Layer2Service::Unacknowledged, None)
+        };
         queue.push_back(prim);
 
         // Close the circuit in CircuitMgr and notify Brew
@@ -824,6 +915,7 @@ impl CcBsSubentity {
         }
 
         // Clean up
+        self.clear_subscriber_channel_state(call_id);
         self.cached_setups.remove(&call_id);
         self.active_calls.remove(&call_id);
     }
@@ -911,6 +1003,9 @@ impl CcBsSubentity {
         let dest_ssi = call.dest_gssi;
         call.tx_active = false;
         call.hangtime_start = Some(self.dltime);
+        call.channel_state = GroupChannelState::AssignedControl;
+        let _ = call;
+        self.sync_subscriber_channel_state(call_id);
 
         // Get dest address from cached setup
         let Some((_, dest_addr, _)) = self.cached_setups.get(&call_id) else {
@@ -1004,11 +1099,15 @@ impl CcBsSubentity {
         call.tx_active = true;
         call.hangtime_start = None;
         call.source_issi = requesting_party.ssi;
+        call.channel_state = GroupChannelState::AssignedTraffic;
 
         // Update caller_addr for local calls
         if let CallOrigin::Local { caller_addr } = &mut call.origin {
             *caller_addr = requesting_party;
         }
+        let _ = call;
+        self.update_cached_setup_speaker(call_id, requesting_party.ssi);
+        self.sync_subscriber_channel_state(call_id);
 
         let Some((_, dest_addr, _)) = self.cached_setups.get(&call_id) else {
             tracing::error!("No cached D-SETUP for call_id={}", call_id);
@@ -1267,6 +1366,7 @@ impl CcBsSubentity {
             call.tx_active = true;
             call.hangtime_start = None;
             call.brew_uuid = Some(brew_uuid);
+            call.channel_state = GroupChannelState::AssignedTraffic;
 
             if let CallOrigin::Network { brew_uuid: old_uuid } = call.origin {
                 // Update UUID if different (shouldn't happen but handle it)
@@ -1283,6 +1383,8 @@ impl CcBsSubentity {
 
             // End the mutable borrow
             let _ = call;
+            self.update_cached_setup_speaker(call_id_val, source_issi);
+            self.sync_subscriber_channel_state(call_id_val);
 
             // Send D-TX GRANTED via FACCH to notify radios of new speaker
             self.send_d_tx_granted_facch(queue, call_id_val, source_issi, dest_gssi, ts);
@@ -1393,7 +1495,7 @@ impl CcBsSubentity {
         let setup_msg = Self::build_sapmsg(
             setup_sdu,
             Some(setup_chan_alloc),
-            self.dltime,
+            Self::mcch_dltime(self.dltime),
             dest_addr,
             Layer2Service::Unacknowledged,
             None,
@@ -1455,8 +1557,10 @@ impl CcBsSubentity {
                 tx_active: true,
                 hangtime_start: None,
                 brew_uuid: Some(brew_uuid),
+                channel_state: GroupChannelState::AssignedTraffic,
             },
         );
+        self.sync_subscriber_channel_state(call_id);
 
         // Respond to Brew with allocated resources, we already ensured it is cleared for brew
         queue.push_back(SapMsg {
@@ -1503,7 +1607,9 @@ impl CcBsSubentity {
                 active_call.tx_active = false;
                 active_call.hangtime_start = Some(self.dltime);
                 active_call.brew_uuid = None;
+                active_call.channel_state = GroupChannelState::AssignedControl;
             }
+            self.sync_subscriber_channel_state(call_id);
             // Send D-TX CEASED via FACCH
             self.send_d_tx_ceased_facch(queue, call_id, dest_gssi, ts);
 
@@ -1570,6 +1676,9 @@ impl CcBsSubentity {
         let dest_gssi = call.dest_gssi;
         call.tx_active = false;
         call.hangtime_start = Some(self.dltime);
+        call.channel_state = GroupChannelState::AssignedControl;
+        let _ = call;
+        self.sync_subscriber_channel_state(call_id);
 
         // Send D-TX CEASED via FACCH to all group members
         self.send_d_tx_ceased_facch(queue, call_id, dest_gssi, ts);
