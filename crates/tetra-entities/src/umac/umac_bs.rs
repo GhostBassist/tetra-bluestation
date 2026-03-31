@@ -7,6 +7,7 @@ use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, SsiType, TdmaTime, Tetr
 use tetra_pdus::mle::fields::bs_service_details::BsServiceDetails;
 use tetra_pdus::mle::pdus::d_mle_sync::DMleSync;
 use tetra_pdus::mle::pdus::d_mle_sysinfo::DMleSysinfo;
+use tetra_pdus::llc::pdus::bl_ack::BlAck;
 use tetra_pdus::umac::enums::mac_pdu_type::MacPduType;
 use tetra_pdus::umac::enums::sysinfo_opt_field_flag::SysinfoOptFieldFlag;
 use tetra_pdus::umac::fields::channel_allocation::ChanAllocElement;
@@ -15,6 +16,7 @@ use tetra_pdus::umac::fields::sysinfo_ext_services::SysinfoExtendedServices;
 use tetra_pdus::umac::pdus::mac_access::MacAccess;
 use tetra_pdus::umac::pdus::mac_data::MacData;
 use tetra_pdus::umac::pdus::mac_end_hu::MacEndHu;
+use tetra_pdus::umac::pdus::mac_end_dl::MacEndDl;
 use tetra_pdus::umac::pdus::mac_end_ul::MacEndUl;
 use tetra_pdus::umac::pdus::mac_frag_ul::MacFragUl;
 use tetra_pdus::umac::pdus::mac_resource::MacResource;
@@ -1120,13 +1122,21 @@ impl UmacBs {
                 const STCH_CAP: usize = 124;
 
                 let usage_marker = prim.chan_alloc.as_ref().and_then(|ca| ca.usage);
+                let is_llc_bl_ack = {
+                    let mut probe = BitBuffer::from_bitbuffer_pos(&sdu);
+                    probe.get_len() == 5 && BlAck::from_bitbuf(&mut probe).is_ok()
+                };
                 // Per ETSI 21.4.3.1: "The random access flag shall be used for the BS to
                 // acknowledge a successful random access so as to prevent the MS sending
                 // further random access requests."
                 // Set the flag if this address has a pending RA (dropped by
                 // dl_drop_all_except_stolen when leaving hangtime), or if the address
                 // is ISSI (direct CC-level response to a MAC-ACCESS).
-                let has_pending_ra = self.channel_scheduler.take_pending_ra_ack(ts, prim.main_address.ssi);
+                let has_pending_ra = if is_llc_bl_ack {
+                    false
+                } else {
+                    self.channel_scheduler.take_pending_ra_ack(ts, prim.main_address.ssi)
+                };
                 let is_random_access_response = has_pending_ra || prim.main_address.ssi_type == SsiType::Issi;
                 let mut mac_pdu = MacResource {
                     fill_bits: false,
@@ -1145,6 +1155,18 @@ impl UmacBs {
                 let facch_len_bits = mac_pdu.compute_header_len() + sdu.get_len();
 
                 if facch_len_bits > STCH_CAP {
+                    if let Some((stch_blk1, stch_blk2)) = Self::build_second_half_stolen_facch(&mac_pdu, &sdu) {
+                        tracing::info!(
+                            "rx_ul_tma_unitdata_req: FACCH stealing uses second half on ts {} (hdr={} sdu={} total={})",
+                            ts,
+                            mac_pdu.compute_header_len(),
+                            sdu.get_len(),
+                            facch_len_bits
+                        );
+                        self.channel_scheduler.dl_enqueue_stealing(ts, stch_blk1, Some(stch_blk2), prim.tx_reporter);
+                        return;
+                    }
+
                     tracing::warn!(
                         "rx_ul_tma_unitdata_req: FACCH payload too large for STCH on ts {} (hdr={} sdu={} total={} cap={}), falling back to normal signaling",
                         ts,
@@ -1171,7 +1193,7 @@ impl UmacBs {
                         stch_block.get_len()
                     );
 
-                    self.channel_scheduler.dl_enqueue_stealing(ts, stch_block, prim.tx_reporter);
+                    self.channel_scheduler.dl_enqueue_stealing(ts, stch_block, None, prim.tx_reporter);
 
                     return;
                 }
@@ -1223,6 +1245,58 @@ impl UmacBs {
 
         // let enqueue_ts = 1;
         // self.channel_scheduler.dl_enqueue_tma(enqueue_ts, pdu, sdu, prim.tx_reporter);
+    }
+
+    fn build_second_half_stolen_facch(mac_pdu: &MacResource, sdu: &BitBuffer) -> Option<(BitBuffer, BitBuffer)> {
+        const STCH_CAP: usize = 124;
+
+        let mut first_hdr = mac_pdu.clone();
+        first_hdr.length_ind = 0b111110;
+        first_hdr.fill_bits = false;
+
+        let first_hdr_len = first_hdr.compute_header_len();
+        if first_hdr_len >= STCH_CAP {
+            return None;
+        }
+
+        let first_sdu_bits = STCH_CAP - first_hdr_len;
+        if sdu.get_len() <= first_sdu_bits {
+            return None;
+        }
+
+        let remaining_bits = sdu.get_len() - first_sdu_bits;
+        let second_hdr_len = MacEndDl::compute_hdr_len(false, false);
+        if second_hdr_len >= STCH_CAP {
+            return None;
+        }
+
+        let required_second_bits = second_hdr_len + remaining_bits;
+        let fill_bits = fillbits::addition::compute_required(required_second_bits, STCH_CAP);
+        let total_second_bits = required_second_bits + fill_bits;
+        if total_second_bits > STCH_CAP {
+            return None;
+        }
+
+        let mut first_block = BitBuffer::new(STCH_CAP);
+        let mut second_block = BitBuffer::new(STCH_CAP);
+        let mut sdu_copy = BitBuffer::from_bitbuffer_pos(sdu);
+
+        first_hdr.to_bitbuf(&mut first_block);
+        first_block.copy_bits(&mut sdu_copy, first_sdu_bits);
+
+        let second_len_bytes = total_second_bits.div_ceil(8) as u8;
+        let second_hdr = MacEndDl {
+            fill_bits: fill_bits > 0,
+            pos_of_grant: 0,
+            length_ind: second_len_bytes,
+            slot_granting_element: None,
+            chan_alloc_element: None,
+        };
+        second_hdr.to_bitbuf(&mut second_block);
+        second_block.copy_bits(&mut sdu_copy, remaining_bits);
+        fillbits::addition::write(&mut second_block, Some(fill_bits));
+
+        Some((first_block, second_block))
     }
 
     fn rx_tma_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {

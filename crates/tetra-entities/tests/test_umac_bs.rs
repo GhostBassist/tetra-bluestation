@@ -180,7 +180,7 @@ fn test_out_fragmented_resource() {
 }
 
 #[test]
-fn test_oversized_facch_falls_back_without_panicking() {
+fn test_oversized_facch_uses_second_stolen_halfslot() {
     debug::setup_logging_verbose();
 
     let dltime = TdmaTime::default().add_timeslots(2);
@@ -239,10 +239,17 @@ fn test_oversized_facch_falls_back_without_panicking() {
     let slot = sink_msgs
         .into_iter()
         .find_map(|m| match m.msg {
-            SapMsgInner::TmvUnitdataReq(slot) => Some(slot),
+            SapMsgInner::TmvUnitdataReq(slot)
+                if slot.ts.t == 2
+                    && slot.blk1.as_ref().is_some_and(|blk| blk.logical_channel == LogicalChannel::Stch) =>
+            {
+                Some(slot)
+            }
             _ => None,
         })
-        .expect("expected TMV output");
+        .expect("expected stolen TMV output on traffic timeslot");
     let blk1 = slot.blk1.expect("expected first block");
-    assert_ne!(blk1.logical_channel, LogicalChannel::Stch);
+    let blk2 = slot.blk2.expect("expected second block");
+    assert_eq!(blk1.logical_channel, LogicalChannel::Stch);
+    assert_eq!(blk2.logical_channel, LogicalChannel::Stch);
 }
